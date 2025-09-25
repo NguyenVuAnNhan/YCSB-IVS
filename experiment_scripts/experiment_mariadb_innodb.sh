@@ -538,7 +538,7 @@ for epoch in $(seq 1 10); do
         # Check if the output file exists, if not, create it with headers
         iteration=$((10*($epoch-1)+$run))
 
-        if [$iteration -eq 5]; then
+        if [ $iteration -eq 5 ]; then
             exit
         fi
 
@@ -728,7 +728,7 @@ for epoch in $(seq 1 10); do
     done
 done
 
-# Delete intermidiate temp files
+# Delete intermediate temp files
 rm -rf $LOG_FILE
 rm -rf $OUTPUT_CSV
 rm -rf $KEY_SIZE_LOG
