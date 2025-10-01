@@ -252,7 +252,7 @@ for epoch in $(seq 1 10); do
     done
 done
 
-# Delete intermidiate temp files
+# Delete intermediate temp files
 rm -rf $LOG_FILE
 rm -rf $OUTPUT_CSV
 
