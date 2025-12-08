@@ -47,20 +47,15 @@ extendoperationcount="10000"
 initialize_database() {
     echo "Initializing PostgreSQL database $DB_NAME..."
 
-    sudo -u postgres dropdb --if-exists "$DB_NAME"
-    sudo -u postgres createdb "$DB_NAME"
+    PGPASSWORD="$DB_PWD" dropdb --if-exists "$DB_NAME" -U "$DB_USERNAME"
+    PGPASSWORD="$DB_PWD" createdb "$DB_NAME" -U "$DB_USERNAME"
 
-    # create table
-    sudo -u postgres psql -d "$DB_NAME" -c \
+    PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c \
         "CREATE TABLE usertable (
             ycsb_key TEXT PRIMARY KEY,
             field0 TEXT, field1 TEXT, field2 TEXT, field3 TEXT, field4 TEXT,
             field5 TEXT, field6 TEXT, field7 TEXT, field8 TEXT, field9 TEXT
         );"
-
-    # grant table privileges to YCSB user
-    sudo -u postgres psql -d "$DB_NAME" -c \
-        "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO $DB_USERNAME;"
 
     echo "Done initializing."
 }
@@ -210,7 +205,7 @@ collect_postgres_metrics() {
 
     # database-level stats
     read blks_read blks_hit tup_returned tup_fetched tup_inserted tup_updated tup_deleted deadlocks temp_files temp_bytes <<< \
-        $(sudo -u postgres psql -d "$db" -Xt -c "
+        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
             SELECT blks_read, blks_hit, tup_returned, tup_fetched,
                    tup_inserted, tup_updated, tup_deleted, deadlocks,
                    temp_files, temp_bytes
@@ -220,7 +215,7 @@ collect_postgres_metrics() {
 
     # bgwriter (checkpoints etc.)
     read checkpoints_timed checkpoints_req buffers_checkpoint buffers_clean buffers_backend buffers_alloc checkpoint_write_time checkpoint_sync_time <<< \
-        $(sudo -u postgres psql -d "$db" -Xt -c "
+        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
             SELECT checkpoints_timed, checkpoints_req,
                    buffers_checkpoint, buffers_clean,
                    buffers_backend, buffers_alloc,
@@ -229,9 +224,9 @@ collect_postgres_metrics() {
         ")
 
     # wal metrics if available
-    if sudo -u postgres psql -d "$db" -c "\d pg_stat_wal" &>/dev/null; then
+    if PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -c "\d pg_stat_wal" &>/dev/null; then
         read wal_bytes wal_records wal_fpi wal_buffers_full <<< \
-            $(sudo -u postgres psql -d "$db" -Xt -c "
+            $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
                 SELECT wal_bytes, wal_records, wal_fpi, wal_buffers_full
                 FROM pg_stat_wal;
             ")
@@ -246,7 +241,7 @@ phase="load"
 $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
 cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
 memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
-extract_postgres_metrics $DB_NAME
+collect_postgres_metrics $DB_NAME
 write_result "TRUE"
 
 # Experiment parameters
@@ -304,7 +299,7 @@ for epoch in $(seq 1 10); do
         $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
         cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
         memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
-        extract_postgres_metrics $DB_NAME
+        collect_postgres_metrics $DB_NAME
         write_result "FALSE"
 
     done
