@@ -240,17 +240,10 @@ collect_postgres_metrics() {
     fi
 }
 
-# Step 1: Delete the ycsb database on MongoDB if any
-log "=== Deleting the ycsb database on MongoDB, if any ==="
-#rm -rf "$DB_PATH"
-#echo "RocksDB database at $DB_PATH has been deleted."
-
 # Execute the load phase
 log "=== Executing the load phase ==="
 phase="load"
 $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
-#sstsize=$(du -sck "$DB_PATH"/*.sst | tail -n 1| cut -f1)
-#logsize=$(du -sck "$DB_PATH"/*.log | tail -n 1| cut -f1)
 cpu=$(ps -p $(pgrep -x mariadbd) -o %cpu | grep -o "[0-9.]*")
 memory=$(ps -p $(pgrep -x mariadbd) -o %mem | grep -o "[0-9.]*") 
 extract_innodb_stats $DB_NAME
@@ -316,9 +309,5 @@ for epoch in $(seq 1 10); do
 
     done
 done
-
-# Delete intermediate temp files
-rm -rf $LOG_FILE
-rm -rf $OUTPUT_CSV
 
 log "=== All steps completed. Results are logged in $LOG_FILE ==="
