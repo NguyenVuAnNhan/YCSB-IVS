@@ -244,9 +244,9 @@ collect_postgres_metrics() {
 log "=== Executing the load phase ==="
 phase="load"
 $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
-cpu=$(ps -p $(pgrep -x mariadbd) -o %cpu | grep -o "[0-9.]*")
-memory=$(ps -p $(pgrep -x mariadbd) -o %mem | grep -o "[0-9.]*") 
-extract_innodb_stats $DB_NAME
+cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+extract_postgres_metrics $DB_NAME
 write_result "TRUE"
 
 # Experiment parameters
@@ -302,9 +302,9 @@ for epoch in $(seq 1 10); do
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
         phase="spread-run"
         $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
-        cpu=$(ps -p $(pgrep -x mariadbd) -o %cpu | grep -o "[0-9.]*")
-        memory=$(ps -p $(pgrep -x mariadbd) -o %mem | grep -o "[0-9.]*")
-        extract_innodb_stats $DB_NAME
+        cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+        memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+        extract_postgres_metrics $DB_NAME
         write_result "FALSE"
 
     done
