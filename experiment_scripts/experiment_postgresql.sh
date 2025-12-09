@@ -90,7 +90,7 @@ write_result() {
 
     if [ "$first" == "TRUE" ]; then   
         # Extract unique second values (except the first one) and create header
-        header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,btree_height,adaptive_hash_hash_searches,adaptive_hash_non_hash_searches,background_log_sync,buffer_pool_dump_status,buffer_pool_load_status,buffer_pool_resize_status,buffer_pool_load_incomplete,buffer_pool_pages_data,buffer_pool_bytes_data,buffer_pool_pages_dirty,buffer_pool_bytes_dirty,buffer_pool_pages_flushed,buffer_pool_pages_free,buffer_pool_pages_made_not_young,buffer_pool_pages_made_young,buffer_pool_pages_misc,buffer_pool_pages_old,buffer_pool_pages_total,buffer_pool_pages_lru_flushed,buffer_pool_pages_lru_freed,buffer_pool_pages_split,buffer_pool_read_ahead_rnd,buffer_pool_read_ahead,buffer_pool_read_ahead_evicted,buffer_pool_read_requests,buffer_pool_reads,buffer_pool_wait_free,buffer_pool_write_requests,checkpoint_age,checkpoint_max_age,data_fsyncs,data_pending_fsyncs,data_pending_reads,data_pending_writes,data_read,data_reads,data_writes,data_written,dblwr_pages_written,dblwr_writes,deadlocks,history_list_length,ibuf_discarded_delete_marks,ibuf_discarded_deletes,ibuf_discarded_inserts,ibuf_free_list,ibuf_merged_delete_marks,ibuf_merged_deletes,ibuf_merged_inserts,ibuf_merges,ibuf_segment_size,ibuf_size,log_waits,log_write_requests,log_writes,lsn_current,lsn_flushed,lsn_last_checkpoint,master_thread_active_loops,master_thread_idle_loops,max_trx_id,mem_adaptive_hash,mem_dictionary,os_log_written,page_size,pages_created,pages_read,pages_written,row_lock_current_waits,row_lock_time,row_lock_time_avg,row_lock_time_max,row_lock_waits,num_open_files,truncated_status_writes,available_undo_logs,undo_truncations,page_compression_saved,num_pages_page_compressed,num_page_compressed_trim_op,num_pages_page_decompressed,num_pages_page_compression_error,num_pages_encrypted,num_pages_decrypted,have_lz4,have_lzo,have_lzma,have_bzip2,have_snappy,have_punch_hole,defragment_compression_failures,defragment_failures,defragment_count,instant_alter_column,onlineddl_rowlog_rows,onlineddl_rowlog_pct_used,onlineddl_pct_progress,encryption_rotation_pages_read_from_cache,encryption_rotation_pages_read_from_disk,encryption_rotation_pages_modified,encryption_rotation_pages_flushed,encryption_rotation_estimated_iops,encryption_n_merge_blocks_encrypted,encryption_n_merge_blocks_decrypted,encryption_n_rowlog_blocks_encrypted,encryption_n_rowlog_blocks_decrypted,encryption_n_temp_blocks_encrypted,encryption_n_temp_blocks_decrypted,encryption_num_key_requests,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec),$(awk '{print $2}' <<< "$filtered_output" | sed 's/,$//' | uniq | awk '{ORS=","; print}')"
+        header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec),$(awk '{print $2}' <<< "$filtered_output" | sed 's/,$//' | uniq | awk '{ORS=","; print}')"
         echo "$header" > "$OUTPUT_FILE"
     fi
 
@@ -116,13 +116,79 @@ write_result() {
 
         # Append to the values variable
         if [ $k -eq 1 ]; then
-            values_1="$r,$phase,$recordcount,$readallfields,$requestdistribution,$operation,$btree_height,$adaptive_hash_hash_searches,$adaptive_hash_non_hash_searches,$background_log_sync,$buffer_pool_dump_status,$buffer_pool_load_status,$buffer_pool_resize_status,$buffer_pool_load_incomplete,$buffer_pool_pages_data,$buffer_pool_bytes_data,$buffer_pool_pages_dirty,$buffer_pool_bytes_dirty,$buffer_pool_pages_flushed,$buffer_pool_pages_free,$buffer_pool_pages_made_not_young,$buffer_pool_pages_made_young,$buffer_pool_pages_misc,$buffer_pool_pages_old,$buffer_pool_pages_total,$buffer_pool_pages_lru_flushed,$buffer_pool_pages_lru_freed,$buffer_pool_pages_split,$buffer_pool_read_ahead_rnd,$buffer_pool_read_ahead,$buffer_pool_read_ahead_evicted,$buffer_pool_read_requests,$buffer_pool_reads,$buffer_pool_wait_free,$buffer_pool_write_requests,$checkpoint_age,$checkpoint_max_age,$data_fsyncs,$data_pending_fsyncs,$data_pending_reads,$data_pending_writes,$data_read,$data_reads,$data_writes,$data_written,$dblwr_pages_written,$dblwr_writes,$deadlocks,$history_list_length,$ibuf_discarded_delete_marks,$ibuf_discarded_deletes,$ibuf_discarded_inserts,$ibuf_free_list,$ibuf_merged_delete_marks,$ibuf_merged_deletes,$ibuf_merged_inserts,$ibuf_merges,$ibuf_segment_size,$ibuf_size,$log_waits,$log_write_requests,$log_writes,$lsn_current,$lsn_flushed,$lsn_last_checkpoint,$master_thread_active_loops,$master_thread_idle_loops,$max_trx_id,$mem_adaptive_hash,$mem_dictionary,$os_log_written,$page_size,$pages_created,$pages_read,$pages_written,$row_lock_current_waits,$row_lock_time,$row_lock_time_avg,$row_lock_time_max,$row_lock_waits,$num_open_files,$truncated_status_writes,$available_undo_logs,$undo_truncations,$page_compression_saved,$num_pages_page_compressed,$num_page_compressed_trim_op,$num_pages_page_decompressed,$num_pages_page_compression_error,$num_pages_encrypted,$num_pages_decrypted,$have_lz4,$have_lzo,$have_lzma,$have_bzip2,$have_snappy,$have_punch_hole,$defragment_compression_failures,$defragment_failures,$defragment_count,$instant_alter_column,$onlineddl_rowlog_rows,$onlineddl_rowlog_pct_used,$onlineddl_pct_progress,$encryption_rotation_pages_read_from_cache,$encryption_rotation_pages_read_from_disk,$encryption_rotation_pages_modified,$encryption_rotation_pages_flushed,$encryption_rotation_estimated_iops,$encryption_n_merge_blocks_encrypted,$encryption_n_merge_blocks_decrypted,$encryption_n_rowlog_blocks_encrypted,$encryption_n_rowlog_blocks_decrypted,$encryption_n_temp_blocks_encrypted,$encryption_n_temp_blocks_decrypted,$encryption_num_key_requests,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"            
+            values_1="$r,\
+            $phase,\
+            $recordcount,\
+            $readallfields,\
+            $requestdistribution,\
+            $operation,\
+            $blks_read,\
+            $blks_hit,\
+            $tup_returned,\
+            $tup_fetched,\
+            $tup_inserted,\
+            $tup_updated,\
+            $tup_deleted,\
+            $deadlocks,\
+            $temp_files,\
+            $temp_bytes,\
+            $checkpoints_timed,\
+            $checkpoints_req,\
+            $buffers_checkpoint,\
+            $buffers_clean,\
+            $buffers_backend,\
+            $buffers_alloc,\
+            $checkpoint_write_time,\
+            $checkpoint_sync_time,\
+            $wal_bytes,\
+            $wal_records,\
+            $wal_fpi,\
+            $wal_buffers_full,\
+            $readproportion,\
+            $updateproportion,\
+            $scanproportion,\
+            $insertproportion,\
+            $extendproportion,\
+            ${run_specific[0]},${run_specific[1]},$third_value"
             k=$((k + 1))
             prev_operation="$operation"
         elif [ $p -eq 1 ] && [ "$prev_operation" == "$operation" ]; then
             values_1="$values_1,$third_value"
         elif [ $p -eq 1 ] && [ "$prev_operation" != "$operation" ]; then
-            values_2="$r,$phase,$recordcount,$readallfields,$requestdistribution,$operation,$btree_height,$adaptive_hash_hash_searches,$adaptive_hash_non_hash_searches,$background_log_sync,$buffer_pool_dump_status,$buffer_pool_load_status,$buffer_pool_resize_status,$buffer_pool_load_incomplete,$buffer_pool_pages_data,$buffer_pool_bytes_data,$buffer_pool_pages_dirty,$buffer_pool_bytes_dirty,$buffer_pool_pages_flushed,$buffer_pool_pages_free,$buffer_pool_pages_made_not_young,$buffer_pool_pages_made_young,$buffer_pool_pages_misc,$buffer_pool_pages_old,$buffer_pool_pages_total,$buffer_pool_pages_lru_flushed,$buffer_pool_pages_lru_freed,$buffer_pool_pages_split,$buffer_pool_read_ahead_rnd,$buffer_pool_read_ahead,$buffer_pool_read_ahead_evicted,$buffer_pool_read_requests,$buffer_pool_reads,$buffer_pool_wait_free,$buffer_pool_write_requests,$checkpoint_age,$checkpoint_max_age,$data_fsyncs,$data_pending_fsyncs,$data_pending_reads,$data_pending_writes,$data_read,$data_reads,$data_writes,$data_written,$dblwr_pages_written,$dblwr_writes,$deadlocks,$history_list_length,$ibuf_discarded_delete_marks,$ibuf_discarded_deletes,$ibuf_discarded_inserts,$ibuf_free_list,$ibuf_merged_delete_marks,$ibuf_merged_deletes,$ibuf_merged_inserts,$ibuf_merges,$ibuf_segment_size,$ibuf_size,$log_waits,$log_write_requests,$log_writes,$lsn_current,$lsn_flushed,$lsn_last_checkpoint,$master_thread_active_loops,$master_thread_idle_loops,$max_trx_id,$mem_adaptive_hash,$mem_dictionary,$os_log_written,$page_size,$pages_created,$pages_read,$pages_written,$row_lock_current_waits,$row_lock_time,$row_lock_time_avg,$row_lock_time_max,$row_lock_waits,$num_open_files,$truncated_status_writes,$available_undo_logs,$undo_truncations,$page_compression_saved,$num_pages_page_compressed,$num_page_compressed_trim_op,$num_pages_page_decompressed,$num_pages_page_compression_error,$num_pages_encrypted,$num_pages_decrypted,$have_lz4,$have_lzo,$have_lzma,$have_bzip2,$have_snappy,$have_punch_hole,$defragment_compression_failures,$defragment_failures,$defragment_count,$instant_alter_column,$onlineddl_rowlog_rows,$onlineddl_rowlog_pct_used,$onlineddl_pct_progress,$encryption_rotation_pages_read_from_cache,$encryption_rotation_pages_read_from_disk,$encryption_rotation_pages_modified,$encryption_rotation_pages_flushed,$encryption_rotation_estimated_iops,$encryption_n_merge_blocks_encrypted,$encryption_n_merge_blocks_decrypted,$encryption_n_rowlog_blocks_encrypted,$encryption_n_rowlog_blocks_decrypted,$encryption_n_temp_blocks_encrypted,$encryption_n_temp_blocks_decrypted,$encryption_num_key_requests,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
+            values_2="$r,\
+            $phase,\
+            $recordcount,\
+            $readallfields,\
+            $requestdistribution,\
+            $operation,\
+            $blks_read,\
+            $blks_hit,\
+            $tup_returned,\
+            $tup_fetched,\
+            $tup_inserted,\
+            $tup_updated,\
+            $tup_deleted,\
+            $deadlocks,\
+            $temp_files,\
+            $temp_bytes,\
+            $checkpoints_timed,\
+            $checkpoints_req,\
+            $buffers_checkpoint,\
+            $buffers_clean,\
+            $buffers_backend,\
+            $buffers_alloc,\
+            $checkpoint_write_time,\
+            $checkpoint_sync_time,\
+            $wal_bytes,\
+            $wal_records,\
+            $wal_fpi,\
+            $wal_buffers_full,\
+            $readproportion,\
+            $updateproportion,\
+            $scanproportion,\
+            $insertproportion,\
+            $extendproportion,\
+            ${run_specific[0]},${run_specific[1]},$third_value"
             p=$((p + 1))
             prev_operation="$operation"
         else
