@@ -205,17 +205,9 @@ write_result() {
 
 }
 
-# Function to close the RocksDB database
+# Function to close the PostgreSQL database
 close_db() {
-    local db_path="$1"
-    log "=== Closing RocksDB database at $db_path ==="
-    DB=$(basename $db_path)
-    if [ -d "$db_path" ]; then
-        lsof | grep "$db_path" | awk '{print $2}' | xargs kill -9
-        log "Closed RocksDB database at $db_path"
-    else
-        log "No RocksDB database found at $db_path"
-    fi
+    log "PostgreSQL backend: no manual DB close required."
 }
 
 # Function to append values for the first iteration
