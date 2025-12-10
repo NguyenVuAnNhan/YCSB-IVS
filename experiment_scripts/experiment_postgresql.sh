@@ -419,9 +419,9 @@ for epoch in $(seq 1 10); do
         source "$WORKLOAD_FILE"
 
         # Save the existing keys in the database
-        mysql -u root --password= -e "
-        USE $DB_NAME;
-        SELECT YCSB_KEY FROM usertable;" | tail -n +2 > keys.txt
+        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
+        -c "SELECT ycsb_key
+            FROM usertable;" | tail -n +2 > keys.txt
 
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
