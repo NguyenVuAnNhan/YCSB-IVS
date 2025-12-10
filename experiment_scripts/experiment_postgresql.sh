@@ -393,10 +393,6 @@ for epoch in $(seq 1 10); do
         # Check if the output file exists, if not, create it with headers
         iteration=$((10*($epoch-1)+$run))
 
-        if [ $iteration -eq 5 ]; then
-            exit
-        fi
-
         if [[ ! -f "$KEY_SIZE_FILE_AFTER_EXTEND" ]]; then
             # Add header row (Key, Run1, Run2, ...)
             echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_EXTEND"
