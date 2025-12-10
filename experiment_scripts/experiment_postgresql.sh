@@ -370,7 +370,7 @@ for epoch in $(seq 1 10); do
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0.2 and other proportions=0 ==="
         phase="extend"
-        $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
+        $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE" > $OUTPUT_CSV 
         cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
         memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
         collect_postgres_metrics $DB_NAME
@@ -420,22 +420,22 @@ for epoch in $(seq 1 10); do
 
         # Save the existing keys in the database
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
-        -c "SELECT ycsb_key
+        -c "SELECT YCSB_KEY
             FROM usertable;" | tail -n +2 > keys.txt
 
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
         phase="run"
         $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE" > $OUTPUT_CSV
-        cpu=$(ps -p $(pgrep -x mariadbd) -o %cpu | grep -o "[0-9.]*")
-        memory=$(ps -p $(pgrep -x mariadbd) -o %mem | grep -o "[0-9.]*")
-        extract_innodb_stats $DB_NAME
+        cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+        memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+        collect_postgres_metrics $DB_NAME
         write_result "FALSE"
 
         # Save the existing keys in the database to remove duplicates later
-        mysql -u root --password= -e "
-        USE $DB_NAME;
-        SELECT YCSB_KEY FROM usertable;" | tail -n +2 > keys_after_run.txt
+        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
+        -c "SELECT YCSB_KEY
+            FROM usertable;" | tail -n +2 > keys_after_run.txt
 
         # Sort both files
         sort keys.txt > keys_sorted.txt
@@ -444,32 +444,29 @@ for epoch in $(seq 1 10); do
         # Get keys that are in keys_after_run.txt but NOT in keys.txt
         comm -13 keys_sorted.txt keys_after_sorted.txt > keys_to_delete.txt
 
-        # Now delete those keys from MySQL
+        # Now delete those keys from PostgreSQL
         while read key; do
           echo "DELETE FROM usertable WHERE YCSB_KEY='$key';"
-        done < keys_to_delete.txt | mysql -u root --password= -D "$DB_NAME"
+        done < keys_to_delete.txt | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME"
 
         rm -rf keys_after_run.txt keys.txt keys_after_sorted.txt keys_to_delete.txt
 
-        mysql -u root --password= -e "
-        USE $UNCHANGE_DB_NAME;
-        SELECT YCSB_KEY FROM usertable;" | tail -n +2 > keys.txt
-
-        # Close the RocksDB database
-        #close_db "$DB_PATH"
+        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" -At -F"," \
+        -c "SELECT YCSB_KEY
+            FROM usertable;" | tail -n +2 > keys.txt
 
         # Workload with unchanging value sizes
         phase="reference"
         $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$UNCHANGE_DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE"  > $OUTPUT_CSV
-        cpu=$(ps -p $(pgrep -x mariadbd) -o %cpu | grep -o "[0-9.]*")
-        memory=$(ps -p $(pgrep -x mariadbd) -o %mem | grep -o "[0-9.]*")
-        extract_innodb_stats $UNCHANGE_DB_NAME
+        cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+        memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+        collect_postgres_metrics $DB_NAME
         write_result "FALSE"
 
         # Save the existing keys in the database to remove duplicates later
-        mysql -u root --password= -e "
-        USE $UNCHANGE_DB_NAME;
-        SELECT YCSB_KEY FROM usertable;" | tail -n +2 > keys_after_run.txt
+        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" -At -F"," \
+        -c "SELECT YCSB_KEY
+            FROM usertable;" | tail -n +2 > keys_after_run.txt
 
         # Sort both files
         sort keys.txt > keys_sorted.txt
@@ -478,10 +475,10 @@ for epoch in $(seq 1 10); do
         # Get keys that are in keys_after_run.txt but NOT in keys.txt
         comm -13 keys_sorted.txt keys_after_sorted.txt > keys_to_delete.txt
 
-        # Now delete those keys from MySQL
+        # Now delete those keys from PostgreSQL
         while read key; do
           echo "DELETE FROM usertable WHERE YCSB_KEY='$key';"
-        done < keys_to_delete.txt | mysql -u root --password= -D "$UNCHANGE_DB_NAME"
+        done < keys_to_delete.txt | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME"
 
         rm -rf keys_after_run.txt keys.txt keys_after_sorted.txt keys_to_delete.txt
     
@@ -489,23 +486,23 @@ for epoch in $(seq 1 10); do
             phase="clean-run"
             
             echo "Backing up the database started"
-            mysql -u root --password= -e "
+            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c "
             DROP DATABASE IF EXISTS $BACKUP_DB_NAME; 
             CREATE DATABASE $BACKUP_DB_NAME; 
-            GRANT ALL PRIVILEGES ON $BACKUP_DB_NAME.* TO '$DB_USERNAME'@'localhost'; 
-            FLUSH PRIVILEGES;"
+            GRANT ALL PRIVILEGES ON $BACKUP_DB_NAME.* TO '$DB_USERNAME'@'localhost';"
 
-            /usr/bin/mysqldump -u root --password= $DB_NAME > "$BACKUP_FILE"
-            wait
-            /usr/bin/mysql -u root --password= $BACKUP_DB_NAME < "$BACKUP_FILE"
-            wait
+            # Dump primary DB into file
+            PGPASSWORD="$DB_PWD" pg_dump -U "$DB_USERNAME" -d "$DB_NAME" > "$BACKUP_FILE"
+
+            # Restore backup
+            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -f "$BACKUP_FILE"
             echo "Backing up the database finished"
 
             $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE" > $OUTPUT_CSV
-            cpu=$(ps -p $(pgrep -x mariadbd) -o %cpu | grep -o "[0-9.]*")
-            memory=$(ps -p $(pgrep -x mariadbd) -o %mem | grep -o "[0-9.]*") 
-            extract_innodb_stats $BACKUP_DB_NAME
-            rm -rf $BACKUP_FILE
+            cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+            memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+            collect_postgres_metrics $BACKUP_DB_NAME
+            rm -rf "$BACKUP_FILE"
             write_result "FALSE"
 
             # Revert and remove fieldlengthdistribution variable from workload file
@@ -513,12 +510,14 @@ for epoch in $(seq 1 10); do
 
             # Key Sizes
             echo "Size computation started"
-            mysql -u root --password= -e " 
-            USE $BACKUP_DB_NAME; 
-            SELECT YCSB_KEY, 
-                    (LENGTHB(FIELD0) + LENGTHB(FIELD1) + LENGTHB(FIELD2) + LENGTHB(FIELD3) + 
-                    LENGTHB(FIELD4) + LENGTHB(FIELD5) + LENGTHB(FIELD6) + LENGTHB(FIELD7) + 
-                    LENGTHB(FIELD8) + LENGTHB(FIELD9)) AS Size FROM usertable;" | sed 's/\t/,/g' > $KEY_SIZE_LOG
+            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," \
+            -c "SELECT ycsb_key,
+                octet_length(field0) + octet_length(field1) + octet_length(field2) +
+                octet_length(field3) + octet_length(field4) + octet_length(field5) +
+                octet_length(field6) + octet_length(field7) + octet_length(field8) +
+                octet_length(field9) AS size
+                FROM usertable;" \
+            >> "$KEY_SIZE_LOG"
             
             # Check if the output file exists, if not, create it with headers
             iteration=$((10*($epoch-1)+$run))
@@ -537,13 +536,13 @@ for epoch in $(seq 1 10); do
             # Extract the recordcount from the workload file (assuming recordcount is in the form 'recordcount=1000')
             recordcount=$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
-            # MySQL query to get the total size of all records
-            total_size=$(mysql -u root --password= -e "
-            USE $BACKUP_DB_NAME; 
-            SELECT SUM(
-                LENGTHB(FIELD0) + LENGTHB(FIELD1) + LENGTHB(FIELD2) + LENGTHB(FIELD3) + 
-                LENGTHB(FIELD4) + LENGTHB(FIELD5) + LENGTHB(FIELD6) + LENGTHB(FIELD7) + 
-                LENGTHB(FIELD8) + LENGTHB(FIELD9)
+            # PostgreSQL query to get the total size of all records
+            total_size=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," \
+            -c "SELECT SUM(
+                octet_length(field0) + octet_length(field1) + octet_length(field2) +
+                octet_length(field3) + octet_length(field4) + octet_length(field5) +
+                octet_length(field6) + octet_length(field7) + octet_length(field8) +
+                octet_length(field9)
             ) FROM usertable;" -s -N)
 
             # Set average field length
@@ -555,9 +554,8 @@ for epoch in $(seq 1 10); do
             perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthaverage/" $WORKLOAD_FILE
             source "$WORKLOAD_FILE"
 
-            mysql -u root --password= -e " 
-            USE $BACKUP_DB_NAME; 
-            TRUNCATE TABLE usertable;"
+            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" \
+            -c "TRUNCATE TABLE usertable;"
 
             # Resetting the database with new data load
             log "=== Executing the load phase for the comparison study ==="
@@ -571,17 +569,17 @@ for epoch in $(seq 1 10); do
             log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
             phase="avg-run"
             $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
-            cpu=$(ps -p $(pgrep -x mariadbd) -o %cpu | grep -o "[0-9.]*")
-            memory=$(ps -p $(pgrep -x mariadbd) -o %mem | grep -o "[0-9.]*")
-            extract_innodb_stats $BACKUP_DB_NAME
+            cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+            memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+            collect_postgres_metrics $BACKUP_DB_NAME
             write_result "FALSE"
-            fi
+        fi
     done
 done
 
 # Delete intermediate temp files
-rm -rf $LOG_FILE
-rm -rf $OUTPUT_CSV
-rm -rf $KEY_SIZE_LOG
+# rm -rf $LOG_FILE
+# rm -rf $OUTPUT_CSV
+# rm -rf $KEY_SIZE_LOG
 
 log "=== All steps completed. Results are logged in $LOG_FILE ==="
