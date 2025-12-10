@@ -340,9 +340,9 @@ collect_postgres_metrics() {
 log "=== Executing the load phase ==="
 phase="load"
 $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
-cpu=$(ps -p $(pgrep -x mariadbd) -o %cpu | grep -o "[0-9.]*")
-memory=$(ps -p $(pgrep -x mariadbd) -o %mem | grep -o "[0-9.]*") 
-extract_innodb_stats $DB_NAME
+cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+collect_postgres_metrics $DB_NAME
 write_result "TRUE"
 
 # Load unchange value size (reference) DB
@@ -370,20 +370,23 @@ for epoch in $(seq 1 10); do
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0.2 and other proportions=0 ==="
         phase="extend"
-        $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
-        cpu=$(ps -p $(pgrep -x mariadbd) -o %cpu | grep -o "[0-9.]*")
-        memory=$(ps -p $(pgrep -x mariadbd) -o %mem | grep -o "[0-9.]*")
-        extract_innodb_stats $DB_NAME
-        write_result "FALSE"
+        $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
+        cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+        memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+        collect_postgres_metrics $DB_NAME
+        write_result "TRUE"
 
         # Key Sizes
         echo "Size computation started"
-        mysql -u root --password= -e " 
-        USE $DB_NAME; 
-        SELECT YCSB_KEY, 
-            (LENGTHB(FIELD0) + LENGTHB(FIELD1) + LENGTHB(FIELD2) + LENGTHB(FIELD3) + 
-            LENGTHB(FIELD4) + LENGTHB(FIELD5) + LENGTHB(FIELD6) + LENGTHB(FIELD7) + 
-            LENGTHB(FIELD8) + LENGTHB(FIELD9)) AS Size FROM usertable;" | sed 's/\t/,/g' > $KEY_SIZE_LOG
+        echo "ycsb_key,size" > "$KEY_SIZE_LOG"
+        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
+        -c "SELECT ycsb_key,
+            octet_length(field0) + octet_length(field1) + octet_length(field2) +
+            octet_length(field3) + octet_length(field4) + octet_length(field5) +
+            octet_length(field6) + octet_length(field7) + octet_length(field8) +
+            octet_length(field9) AS size
+            FROM usertable;" \
+        >> "$KEY_SIZE_LOG"
 
         get_key_sizes $KEY_SIZE_LOG $HISTOGRAM_FILE
 
