@@ -269,8 +269,8 @@ get_key_sizes() {
 
 delete_new_keys() {
   local db_name="$1"            # Required: name of the database
-  local user="${2:-root}"       # Optional: MySQL username (default: root)
-  local password="${3:-}"       # Optional: MySQL password (default: empty)
+  local user="${2:-postgres}"       # Optional: PostgreSQL username (default: postgres)
+  local password="${3:-postgres}"       # Optional: PostgreSQL password (default: postgres)
   local table="${4:-usertable}" # Optional: table name (default: usertable)
   local key_column="${5:-YCSB_KEY}" # Optional: primary key column (default: YCSB_KEY)
 
@@ -295,7 +295,7 @@ delete_new_keys() {
   # Run DELETE statements
   while read -r key; do
     echo "DELETE FROM $table WHERE $key_column='$key';"
-  done < "$file_to_delete" | mysql -u "$user" --password="$password" -D "$db_name"
+  done < "$file_to_delete" | PGPASSWORD="$password" psql -U "$user" -d "$db_name"
 
   echo "✅ Deletion complete."
 }
