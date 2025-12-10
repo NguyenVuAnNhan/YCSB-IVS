@@ -300,245 +300,41 @@ delete_new_keys() {
   echo "✅ Deletion complete."
 }
 
-# Global variables for storing InnoDB buffer pool statistics
-btree_height=""
-adaptive_hash_hash_searches=""
-adaptive_hash_non_hash_searches=""
-background_log_sync=""
-buffer_pool_dump_status=""
-buffer_pool_load_status=""
-buffer_pool_resize_status=""
-buffer_pool_load_incomplete=""
-buffer_pool_pages_data=""
-buffer_pool_bytes_data=""
-buffer_pool_pages_dirty=""
-buffer_pool_bytes_dirty=""
-buffer_pool_pages_flushed=""
-buffer_pool_pages_free=""
-buffer_pool_pages_made_not_young=""
-buffer_pool_pages_made_young=""
-buffer_pool_pages_misc=""
-buffer_pool_pages_old=""
-buffer_pool_pages_total=""
-buffer_pool_pages_lru_flushed=""
-buffer_pool_pages_lru_freed=""
-buffer_pool_pages_split=""
-buffer_pool_read_ahead_rnd=""
-buffer_pool_read_ahead=""
-buffer_pool_read_ahead_evicted=""
-buffer_pool_read_requests=""
-buffer_pool_reads=""
-buffer_pool_wait_free=""
-buffer_pool_write_requests=""
-checkpoint_age=""
-checkpoint_max_age=""
-data_fsyncs=""
-data_pending_fsyncs=""
-data_pending_reads=""
-data_pending_writes=""
-data_read=""
-data_reads=""
-data_writes=""
-data_written=""
-dblwr_pages_written=""
-dblwr_writes=""
-deadlocks=""
-history_list_length=""
-ibuf_discarded_delete_marks=""
-ibuf_discarded_deletes=""
-ibuf_discarded_inserts=""
-ibuf_free_list=""
-ibuf_merged_delete_marks=""
-ibuf_merged_deletes=""
-ibuf_merged_inserts=""
-ibuf_merges=""
-ibuf_segment_size=""
-ibuf_size=""
-log_waits=""
-log_write_requests=""
-log_writes=""
-lsn_current=""
-lsn_flushed=""
-lsn_last_checkpoint=""
-master_thread_active_loops=""
-master_thread_idle_loops=""
-max_trx_id=""
-mem_adaptive_hash=""
-mem_dictionary=""
-os_log_written=""
-page_size=""
-pages_created=""
-pages_read=""
-pages_written=""
-row_lock_current_waits=""
-row_lock_time=""
-row_lock_time_avg=""
-row_lock_time_max=""
-row_lock_waits=""
-num_open_files=""
-truncated_status_writes=""
-available_undo_logs=""
-undo_truncations=""
-page_compression_saved=""
-num_pages_page_compressed=""
-num_page_compressed_trim_op=""
-num_pages_page_decompressed=""
-num_pages_page_compression_error=""
-num_pages_encrypted=""
-num_pages_decrypted=""
-have_lz4=""
-have_lzo=""
-have_lzma=""
-have_bzip2=""
-have_snappy=""
-have_punch_hole=""
-defragment_compression_failures=""
-defragment_failures=""
-defragment_count=""
-instant_alter_column=""
-onlineddl_rowlog_rows=""
-onlineddl_rowlog_pct_used=""
-onlineddl_pct_progress=""
-encryption_rotation_pages_read_from_cache=""
-encryption_rotation_pages_read_from_disk=""
-encryption_rotation_pages_modified=""
-encryption_rotation_pages_flushed=""
-encryption_rotation_estimated_iops=""
-encryption_n_merge_blocks_encrypted=""
-encryption_n_merge_blocks_decrypted=""
-encryption_n_rowlog_blocks_encrypted=""
-encryption_n_rowlog_blocks_decrypted=""
-encryption_n_temp_blocks_encrypted=""
-encryption_n_temp_blocks_decrypted=""
-encryption_num_key_requests=""
+# Function to extract PostgreSQL database and background writer statistics
+collect_postgres_metrics() {
+    local db="$DB_NAME"
 
-# Function to extract InnoDB buffer pool statistics
-function extract_innodb_stats() {
-    local db="$1"
+    # database-level stats
+    read blks_read blks_hit tup_returned tup_fetched tup_inserted tup_updated tup_deleted deadlocks temp_files temp_bytes <<< \
+        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+            SELECT blks_read, blks_hit, tup_returned, tup_fetched,
+                   tup_inserted, tup_updated, tup_deleted, deadlocks,
+                   temp_files, temp_bytes
+            FROM pg_stat_database
+            WHERE datname = '$db';
+        ")
 
-    # Query to get buffer pool statistics from MariaDB
-    buffer_pool_stats=$(mysql -u root --password= -e "USE $db; SHOW GLOBAL STATUS LIKE 'Innodb_%';")
-    echo $buffer_pool_stats
+    # bgwriter (checkpoints etc.)
+    read checkpoints_timed checkpoints_req buffers_checkpoint buffers_clean buffers_backend buffers_alloc checkpoint_write_time checkpoint_sync_time <<< \
+        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+            SELECT checkpoints_timed, checkpoints_req,
+                   buffers_checkpoint, buffers_clean,
+                   buffers_backend, buffers_alloc,
+                   checkpoint_write_time, checkpoint_sync_time
+            FROM pg_stat_bgwriter;
+        ")
 
-    # Extract specific values using grep and awk
-    btree_height=$(sudo bash -c '../inno_space/inno -f /var/lib/mysql/ycsb/usertable.ibd -c index-summary | grep "Btree hight" | awk -F: "{print \$2}" | tr -d " "')
-
-    adaptive_hash_hash_searches=$(echo "$buffer_pool_stats" | grep "Innodb_adaptive_hash_hash_searches" | awk '{print $2}')
-    adaptive_hash_non_hash_searches=$(echo "$buffer_pool_stats" | grep "Innodb_adaptive_hash_non_hash_searches" | awk '{print $2}')
-    background_log_sync=$(echo "$buffer_pool_stats" | grep "Innodb_background_log_sync" | awk '{print $2}')
-    buffer_pool_dump_status=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_dump_status" | awk '{print $2}')
-    buffer_pool_load_status=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_load_status" | awk '{print $2}')
-    buffer_pool_resize_status=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_resize_status" | awk '{print $2}')
-    buffer_pool_load_incomplete=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_load_incomplete" | awk '{print $2}')
-    buffer_pool_pages_data=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_data" | awk '{print $2}')
-    buffer_pool_bytes_data=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_bytes_data" | awk '{print $2}')
-    buffer_pool_pages_dirty=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_dirty" | awk '{print $2}')
-    buffer_pool_bytes_dirty=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_bytes_dirty" | awk '{print $2}')
-    buffer_pool_pages_flushed=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_flushed" | awk '{print $2}')
-    buffer_pool_pages_free=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_free" | awk '{print $2}')
-    buffer_pool_pages_made_not_young=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_made_not_young" | awk '{print $2}')
-    buffer_pool_pages_made_young=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_made_young" | awk '{print $2}')
-    buffer_pool_pages_misc=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_misc" | awk '{print $2}')
-    buffer_pool_pages_old=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_old" | awk '{print $2}')
-    buffer_pool_pages_total=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_total" | awk '{print $2}')
-    buffer_pool_pages_lru_flushed=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_lru_flushed" | awk '{print $2}')
-    buffer_pool_pages_lru_freed=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_lru_freed" | awk '{print $2}')
-    buffer_pool_pages_split=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_pages_split" | awk '{print $2}')
-    buffer_pool_read_ahead_rnd=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_read_ahead_rnd" | awk '{print $2}')
-    buffer_pool_read_ahead=$(echo $(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_read_ahead" | awk '{print $2}') | awk '{print $2}')
-    buffer_pool_read_ahead_evicted=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_read_ahead_evicted" | awk '{print $2}')
-    buffer_pool_read_requests=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_read_requests" | awk '{print $2}')
-    buffer_pool_reads=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_reads" | awk '{print $2}')
-    buffer_pool_wait_free=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_wait_free" | awk '{print $2}')
-    buffer_pool_write_requests=$(echo "$buffer_pool_stats" | grep "Innodb_buffer_pool_write_requests" | awk '{print $2}')
-    checkpoint_age=$(echo "$buffer_pool_stats" | grep "Innodb_checkpoint_age" | awk '{print $2}')
-    checkpoint_max_age=$(echo "$buffer_pool_stats" | grep "Innodb_checkpoint_max_age" | awk '{print $2}')
-    data_fsyncs=$(echo "$buffer_pool_stats" | grep "Innodb_data_fsyncs" | awk '{print $2}')
-    data_pending_fsyncs=$(echo "$buffer_pool_stats" | grep "Innodb_data_pending_fsyncs" | awk '{print $2}')
-    data_pending_reads=$(echo "$buffer_pool_stats" | grep "Innodb_data_pending_reads" | awk '{print $2}')
-    data_pending_writes=$(echo "$buffer_pool_stats" | grep "Innodb_data_pending_writes" | awk '{print $2}')
-    data_read=$(echo $(echo "$buffer_pool_stats" | grep "Innodb_data_read" | awk '{print $2}') | awk '{print $1}')
-    data_reads=$(echo "$buffer_pool_stats" | grep "Innodb_data_reads" | awk '{print $2}')
-    data_writes=$(echo "$buffer_pool_stats" | grep "Innodb_data_writes" | awk '{print $2}')
-    data_written=$(echo "$buffer_pool_stats" | grep "Innodb_data_written" | awk '{print $2}')
-    dblwr_pages_written=$(echo "$buffer_pool_stats" | grep "Innodb_dblwr_pages_written" | awk '{print $2}')
-    dblwr_writes=$(echo "$buffer_pool_stats" | grep "Innodb_dblwr_writes" | awk '{print $2}')
-    deadlocks=$(echo "$buffer_pool_stats" | grep "Innodb_deadlocks" | awk '{print $2}')
-    history_list_length=$(echo "$buffer_pool_stats" | grep "Innodb_history_list_length" | awk '{print $2}')
-    ibuf_discarded_delete_marks=$(echo "$buffer_pool_stats" | grep "Innodb_ibuf_discarded_delete_marks" | awk '{print $2}')
-    ibuf_discarded_deletes=$(echo "$buffer_pool_stats" | grep "Innodb_ibuf_discarded_deletes" | awk '{print $2}')
-    ibuf_discarded_inserts=$(echo "$buffer_pool_stats" | grep "Innodb_ibuf_discarded_inserts" | awk '{print $2}')
-    ibuf_free_list=$(echo "$buffer_pool_stats" | grep "Innodb_ibuf_free_list" | awk '{print $2}')
-    ibuf_merged_delete_marks=$(echo "$buffer_pool_stats" | grep "Innodb_ibuf_merged_delete_marks" | awk '{print $2}')
-    ibuf_merged_deletes=$(echo "$buffer_pool_stats" | grep "Innodb_ibuf_merged_deletes" | awk '{print $2}')
-    ibuf_merged_inserts=$(echo "$buffer_pool_stats" | grep "Innodb_ibuf_merged_inserts" | awk '{print $2}')
-    ibuf_merges=$(echo "$buffer_pool_stats" | grep "Innodb_ibuf_merges" | awk '{print $2}')
-    ibuf_segment_size=$(echo "$buffer_pool_stats" | grep "Innodb_ibuf_segment_size" | awk '{print $2}')
-    ibuf_size=$(echo "$buffer_pool_stats" | grep "Innodb_ibuf_size" | awk '{print $2}')
-    log_waits=$(echo "$buffer_pool_stats" | grep "Innodb_log_waits" | awk '{print $2}')
-    log_write_requests=$(echo "$buffer_pool_stats" | grep "Innodb_log_write_requests" | awk '{print $2}')
-    log_writes=$(echo "$buffer_pool_stats" | grep "Innodb_log_writes" | awk '{print $2}')
-    lsn_current=$(echo "$buffer_pool_stats" | grep "Innodb_lsn_current" | awk '{print $2}')
-    lsn_flushed=$(echo "$buffer_pool_stats" | grep "Innodb_lsn_flushed" | awk '{print $2}')
-    lsn_last_checkpoint=$(echo "$buffer_pool_stats" | grep "Innodb_lsn_last_checkpoint" | awk '{print $2}')
-    master_thread_active_loops=$(echo "$buffer_pool_stats" | grep "Innodb_master_thread_active_loops" | awk '{print $2}')
-    master_thread_idle_loops=$(echo "$buffer_pool_stats" | grep "Innodb_master_thread_idle_loops" | awk '{print $2}')
-    max_trx_id=$(echo "$buffer_pool_stats" | grep "Innodb_max_trx_id" | awk '{print $2}')
-    mem_adaptive_hash=$(echo "$buffer_pool_stats" | grep "Innodb_mem_adaptive_hash" | awk '{print $2}')
-    mem_dictionary=$(echo "$buffer_pool_stats" | grep "Innodb_mem_dictionary" | awk '{print $2}')
-    os_log_written=$(echo "$buffer_pool_stats" | grep "Innodb_os_log_written" | awk '{print $2}')
-    page_size=$(echo "$buffer_pool_stats" | grep "Innodb_page_size" | awk '{print $2}')
-    pages_created=$(echo "$buffer_pool_stats" | grep "Innodb_pages_created" | awk '{print $2}')
-    pages_read=$(echo "$buffer_pool_stats" | grep "Innodb_pages_read" | awk '{print $2}')
-    pages_written=$(echo "$buffer_pool_stats" | grep "Innodb_pages_written" | awk '{print $2}')
-    row_lock_current_waits=$(echo "$buffer_pool_stats" | grep "Innodb_row_lock_current_waits" | awk '{print $2}')
-    row_lock_time=$(echo $(echo "$buffer_pool_stats" | grep "Innodb_row_lock_time" | awk '{print $2}') | awk '{print $1}')
-    row_lock_time_avg=$(echo "$buffer_pool_stats" | grep "Innodb_row_lock_time_avg" | awk '{print $2}')
-    row_lock_time_max=$(echo "$buffer_pool_stats" | grep "Innodb_row_lock_time_max" | awk '{print $2}')
-    row_lock_waits=$(echo "$buffer_pool_stats" | grep "Innodb_row_lock_waits" | awk '{print $2}')
-    num_open_files=$(echo "$buffer_pool_stats" | grep "Innodb_num_open_files" | awk '{print $2}')
-    truncated_status_writes=$(echo "$buffer_pool_stats" | grep "Innodb_truncated_status_writes" | awk '{print $2}')
-    available_undo_logs=$(echo "$buffer_pool_stats" | grep "Innodb_available_undo_logs" | awk '{print $2}')
-    undo_truncations=$(echo "$buffer_pool_stats" | grep "Innodb_undo_truncations" | awk '{print $2}')
-    page_compression_saved=$(echo "$buffer_pool_stats" | grep "Innodb_page_compression_saved" | awk '{print $2}')
-    num_pages_page_compressed=$(echo "$buffer_pool_stats" | grep "Innodb_num_pages_page_compressed" | awk '{print $2}')
-    num_page_compressed_trim_op=$(echo "$buffer_pool_stats" | grep "Innodb_num_page_compressed_trim_op" | awk '{print $2}')
-    num_pages_page_decompressed=$(echo "$buffer_pool_stats" | grep "Innodb_num_pages_page_decompressed" | awk '{print $2}')
-    num_pages_page_compression_error=$(echo "$buffer_pool_stats" | grep "Innodb_num_pages_page_compression_error" | awk '{print $2}')
-    num_pages_encrypted=$(echo "$buffer_pool_stats" | grep "Innodb_num_pages_encrypted" | awk '{print $2}')
-    num_pages_decrypted=$(echo "$buffer_pool_stats" | grep "Innodb_num_pages_decrypted" | awk '{print $2}')
-    have_lz4=$(echo "$buffer_pool_stats" | grep "Innodb_have_lz4" | awk '{print $2}')
-    have_lzo=$(echo "$buffer_pool_stats" | grep "Innodb_have_lzo" | awk '{print $2}')
-    have_lzma=$(echo "$buffer_pool_stats" | grep "Innodb_have_lzma" | awk '{print $2}')
-    have_bzip2=$(echo "$buffer_pool_stats" | grep "Innodb_have_bzip2" | awk '{print $2}')
-    have_snappy=$(echo "$buffer_pool_stats" | grep "Innodb_have_snappy" | awk '{print $2}')
-    have_punch_hole=$(echo "$buffer_pool_stats" | grep "Innodb_have_punch_hole" | awk '{print $2}')
-    defragment_compression_failures=$(echo "$buffer_pool_stats" | grep "Innodb_defragment_compression_failures" | awk '{print $2}')
-    defragment_failures=$(echo "$buffer_pool_stats" | grep "Innodb_defragment_failures" | awk '{print $2}')
-    defragment_count=$(echo "$buffer_pool_stats" | grep "Innodb_defragment_count" | awk '{print $2}')
-    instant_alter_column=$(echo "$buffer_pool_stats" | grep "Innodb_instant_alter_column" | awk '{print $2}')
-    onlineddl_rowlog_rows=$(echo "$buffer_pool_stats" | grep "Innodb_onlineddl_rowlog_rows" | awk '{print $2}')
-    onlineddl_rowlog_pct_used=$(echo "$buffer_pool_stats" | grep "Innodb_onlineddl_rowlog_pct_used" | awk '{print $2}')
-    onlineddl_pct_progress=$(echo "$buffer_pool_stats" | grep "Innodb_onlineddl_pct_progress" | awk '{print $2}')
-    encryption_rotation_pages_read_from_cache=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_rotation_pages_read_from_cache" | awk '{print $2}')
-    encryption_rotation_pages_read_from_disk=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_rotation_pages_read_from_disk" | awk '{print $2}')
-    encryption_rotation_pages_modified=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_rotation_pages_modified" | awk '{print $2}')
-    encryption_rotation_pages_flushed=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_rotation_pages_flushed" | awk '{print $2}')
-    encryption_rotation_estimated_iops=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_rotation_estimated_iops" | awk '{print $2}')
-    encryption_n_merge_blocks_encrypted=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_n_merge_blocks_encrypted" | awk '{print $2}')
-    encryption_n_merge_blocks_decrypted=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_n_merge_blocks_decrypted" | awk '{print $2}')
-    encryption_n_rowlog_blocks_encrypted=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_n_rowlog_blocks_encrypted" | awk '{print $2}')
-    encryption_n_rowlog_blocks_decrypted=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_n_rowlog_blocks_decrypted" | awk '{print $2}')
-    encryption_n_temp_blocks_encrypted=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_n_temp_blocks_encrypted" | awk '{print $2}')
-    encryption_n_temp_blocks_decrypted=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_n_temp_blocks_decrypted" | awk '{print $2}')
-    encryption_num_key_requests=$(echo "$buffer_pool_stats" | grep "Innodb_encryption_num_key_requests" | awk '{print $2}')
-
+    # wal metrics if available
+    if PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -c "\d pg_stat_wal" &>/dev/null; then
+        read wal_bytes wal_records wal_fpi wal_buffers_full <<< \
+            $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+                SELECT wal_bytes, wal_records, wal_fpi, wal_buffers_full
+                FROM pg_stat_wal;
+            ")
+    else
+        wal_bytes=""; wal_records=""; wal_fpi=""; wal_buffers_full=""
+    fi
 }
-
-# Step 1: Delete the ycsb database on MongoDB if any
-log "=== Deleting the ycsb database on MongoDB, if any ==="
-#rm -rf "$DB_PATH"
-#echo "RocksDB database at $DB_PATH has been deleted."
 
 # Execute the load phase
 log "=== Executing the load phase ==="
