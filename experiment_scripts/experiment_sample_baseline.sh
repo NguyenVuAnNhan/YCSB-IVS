@@ -130,6 +130,14 @@ final_row = (
     "${dynamic_fields[@]}"
 )
 
+run_ycsb_load() {
+    $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
+}
+
+run_ycsb_run() {
+    $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
+}
+
 #----------------------------------------------------------#
 
 YCSB="bin/ycsb.sh"
@@ -277,7 +285,8 @@ write_result() {
 # Execute the load phase
 log "=== Executing the load phase ==="
 phase="load"
-$YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
+run_ycsb_load
+
 measure_stats
 write_result "TRUE"
 
@@ -307,7 +316,7 @@ for epoch in $(seq 1 10); do
         # Change operation count for insert mode
         perl -i -p -e "s/^operationcount=.*/operationcount=$updatedoperationcount/" $WORKLOAD_FILE
 
-        $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
+        run_ycsb_run
 
         # Setting parameter values for run phase
         log "=== Setting parameter values for run phase ==="
@@ -333,7 +342,7 @@ for epoch in $(seq 1 10); do
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
         phase="spread-run"
-        $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
+        run_ycsb_run
         measure_stats
         write_result "FALSE"
 
