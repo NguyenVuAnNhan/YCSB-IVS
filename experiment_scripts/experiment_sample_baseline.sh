@@ -1,0 +1,343 @@
+#!/bin/bash
+
+######Change database functions to work with a new database here######
+
+drop_database() {
+    PGPASSWORD="$DB_PWD" dropdb --if-exists "$DB_NAME" -U "$DB_USERNAME"
+}
+
+create_database() {
+    PGPASSWORD="$DB_PWD" createdb "$DB_NAME" -U "$DB_USERNAME"
+}
+
+create_table() {
+    PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c \
+        "CREATE TABLE usertable (
+            ycsb_key TEXT PRIMARY KEY,
+            field0 TEXT, field1 TEXT, field2 TEXT, field3 TEXT, field4 TEXT,
+            field5 TEXT, field6 TEXT, field7 TEXT, field8 TEXT, field9 TEXT
+        );"
+}
+
+common_header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation"
+prop_header="Readprop,Updateprop,Scanprop,Insertprop,Extendprop"
+stats_header="blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full"
+runtime_header="Runtime(ms),Throughput(ops/sec)"
+
+extract_dynamic_fields() {
+    awk '{print $2}' <<< "$filtered_output" \
+    | sed 's/,$//' \
+    | uniq \
+    | awk '{ORS=","; print}'
+}
+
+dynamic_fields="$(extract_dynamic_fields)"
+
+# Function to close the PostgreSQL database
+close_db() {
+    log "PostgreSQL backend: no manual DB close required."
+}
+
+# Function to extract PostgreSQL database and background writer statistics
+collect_postgres_metrics() {
+    local db="$DB_NAME"
+
+    # database-level stats
+    read blks_read blks_hit tup_returned tup_fetched tup_inserted tup_updated tup_deleted deadlocks temp_files temp_bytes <<< \
+        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+            SELECT blks_read, blks_hit, tup_returned, tup_fetched,
+                   tup_inserted, tup_updated, tup_deleted, deadlocks,
+                   temp_files, temp_bytes
+            FROM pg_stat_database
+            WHERE datname = '$db';
+        ")
+
+    # bgwriter (checkpoints etc.)
+    read checkpoints_timed checkpoints_req buffers_checkpoint buffers_clean buffers_backend buffers_alloc checkpoint_write_time checkpoint_sync_time <<< \
+        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+            SELECT checkpoints_timed, checkpoints_req,
+                   buffers_checkpoint, buffers_clean,
+                   buffers_backend, buffers_alloc,
+                   checkpoint_write_time, checkpoint_sync_time
+            FROM pg_stat_bgwriter;
+        ")
+
+    # wal metrics if available
+    if PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -c "\d pg_stat_wal" &>/dev/null; then
+        read wal_bytes wal_records wal_fpi wal_buffers_full <<< \
+            $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+                SELECT wal_bytes, wal_records, wal_fpi, wal_buffers_full
+                FROM pg_stat_wal;
+            ")
+    else
+        wal_bytes=""; wal_records=""; wal_fpi=""; wal_buffers_full=""
+    fi
+}
+
+measure_stats() {
+    cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+    memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+    collect_postgres_metrics $DB_NAME
+}
+
+common_fields=(
+    "$epoch"
+    "$phase"
+    "$recordcount"
+    "$readallfields"
+    "$requestdistribution"
+)
+
+binding_fields=(
+    "$blks_read"
+    "$blks_hit"
+    "$tup_returned"
+    "$tup_fetched"
+    "$tup_inserted"
+    "$tup_updated"
+    "$tup_deleted"
+    "$deadlocks"
+    "$temp_files"
+    "$temp_bytes"
+    "$checkpoints_timed"
+    "$checkpoints_req"
+    "$buffers_checkpoint"
+    "$buffers_clean"
+    "$buffers_backend"
+    "$buffers_alloc"
+    "$checkpoint_write_time"
+    "$checkpoint_sync_time"
+    "$wal_bytes"
+    "$wal_records"
+    "$wal_fpi"
+    "$wal_buffers_full"
+)
+
+prop_fields=(
+    "$readproportion"
+    "$updateproportion"
+    "$scanproportion"
+    "$insertproportion"
+    "$extendproportion"
+)
+
+dynamic_fields=("${run_specific[@]}" "$third_value")
+
+final_row = (
+    "${common_fields[@]}"
+    "${binding_fields[@]}"
+    "${prop_fields[@]}"
+    "${dynamic_fields[@]}"
+)
+
+#----------------------------------------------------------#
+
+YCSB="bin/ycsb.sh"
+
+# DB names
+DB_NAME="ycsb"
+BACKUP_DB_NAME="ycsb_backup"
+UNCHANGE_DB_NAME="ycsb_unchange"
+
+# Path to the PostgreSQL data directory
+DB_URL="jdbc:postgresql://localhost:5432/$DB_NAME"
+JDBC_PROPERTIES="jdbc-binding/conf/postgres.properties"
+DB_USERNAME="ycsb"
+DB_PWD="USyd2025"
+
+# Define the workload file and the log file
+WORKLOAD_FILE="../workloads/workloada-extend"
+LOG_FILE="./ycsb_postgresql_results.log"
+OUTPUT_CSV="../analysis/postgresql_output.csv"
+
+# Define input and output filenames  
+INPUT_FILE="../analysis/postgresql_output.csv"
+OUTPUT_FILE="../analysis/Data/Baseline_data/postgresql_run1_spreadrun_light.csv"
+
+# Extend phase experiment parameters
+extendproportion_extend="0"
+readproportion_extend="0"
+updateproportion_extend="0"
+scanproportion_extend="0"
+insertproportion_extend="1"
+readmodifywriteproportion_extend="0"
+requestdistribution_extend="uniform"
+
+# After extend phase experiment parameters
+extendproportion_postextend="0"
+readproportion_postextend="0.5"
+updateproportion_postextend="0.5"
+scanproportion_postextend="0"
+insertproportion_postextend="0"
+readmodifywriteproportion_postextend="0"
+requestdistribution_postextend="uniform"
+
+fieldlengthoriginal="100"
+extendoperationcount="10000"
+
+# Initialize PostgreSQL database
+initialize_database() {
+    echo "Initializing PostgreSQL database $DB_NAME..."
+
+    drop_database
+
+    create_database
+
+    create_table
+
+    echo "Done initializing."
+}
+
+initialize_database
+
+# Function to log and print messages
+log() {
+    echo "$1" | tee -a $LOG_FILE
+}
+
+# Clear the log file
+> $LOG_FILE
+
+# Function to write results as a csv 
+write_result() {
+    local first="$1"
+    # Remove rows not starting with specific operations and filter specific operations
+    filtered_output=$(awk '/^\[(INSERT|READ|UPDATE|SCAN|EXTEND)\]/' "$INPUT_FILE")
+    overall_output=$(awk '/^\[(OVERALL)\]/' "$INPUT_FILE")
+
+    if [ "$first" == "TRUE" ]; then   
+        # Extract unique second values (except the first one) and create header
+        header="$common_header,$stats_header,$prop_header,$runtime_header,$dynamic_fields"
+        echo "$header" > "$OUTPUT_FILE"
+    fi
+
+    # Iterate through each line
+    values_1=""
+    values_2=""
+    k=1
+    p=1
+    prev_operation=""
+    while IFS= read -r line; do
+        # Extract operation and third value
+        operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
+        third_value=$(echo "$line" | awk '{print $3}' | sed 's/,$//')
+        r=$((10 * ($epoch - 1) + $run))
+
+        run_specific=()
+        # Extract throughput
+        while IFS= read -r inner_line; do
+            # Extract third value
+            tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
+            run_specific+=("$tmp")
+        done <<< "$overall_output"
+
+        # Append to the values variable
+        if [ $k -eq 1 ]; then
+            row_fields=(
+                "${common_fields[@]}"
+                "${binding_fields[@]}"
+                "${prop_fields[@]}"
+                "${dynamic_fields[@]}"
+            )
+
+            # join with commas
+            IFS=',' values_1="${row_fields[*]}"
+
+            k=$((k + 1))
+            prev_operation="$operation"
+        elif [ $p -eq 1 ] && [ "$prev_operation" == "$operation" ]; then
+            values_1="$values_1,$third_value"
+        elif [ $p -eq 1 ] && [ "$prev_operation" != "$operation" ]; then
+            row_fields=(
+                "${common_fields[@]}"
+                "${binding_fields[@]}"
+                "${prop_fields[@]}"
+                "${dynamic_fields[@]}"
+            )
+
+            # join with commas
+            IFS=',' values_2="${row_fields[*]}"
+
+            p=$((p + 1))
+            prev_operation="$operation"
+        else
+            values_2="$values_2,$third_value"
+        fi
+    done <<< "$filtered_output"
+
+    # Print the values to the output file
+    echo "$values_1" >> "$OUTPUT_FILE"
+    echo "$values_2" >> "$OUTPUT_FILE"
+
+    # Print completion message
+    echo "Arrangement completed. Output saved to $OUTPUT_FILE"
+
+}
+
+# Execute the load phase
+log "=== Executing the load phase ==="
+phase="load"
+$YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
+measure_stats
+write_result "TRUE"
+
+# Experiment parameters
+for epoch in $(seq 1 10); do
+    for run in $(seq 1 10); do
+
+        # Set proportions for insert mode
+        log "=== Setting parameter values for extend phase ==="
+        perl -i -p -e "s/^extendproportion=.*/extendproportion=$extendproportion_extend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^readproportion=.*/readproportion=$readproportion_extend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^updateproportion=.*/updateproportion=$updateproportion_extend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^scanproportion=.*/scanproportion=$scanproportion_extend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^insertproportion=.*/insertproportion=$insertproportion_extend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_extend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_extend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^operationcount=.*/operationcount=$extendoperationcount/" $WORKLOAD_FILE
+        source "$WORKLOAD_FILE"
+
+        # Extract the recordcount and operationcount from the workload file
+        operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+        recordcount=$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+        
+        # Compute the new record number to be added
+        updatedoperationcount=$(echo "($extendoperationcount / 10)" | bc)
+
+        # Change operation count for insert mode
+        perl -i -p -e "s/^operationcount=.*/operationcount=$updatedoperationcount/" $WORKLOAD_FILE
+
+        $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
+
+        # Setting parameter values for run phase
+        log "=== Setting parameter values for run phase ==="
+        perl -i -p -e "s/^extendproportion=.*/extendproportion=$extendproportion_postextend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^readproportion=.*/readproportion=$readproportion_postextend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^updateproportion=.*/updateproportion=$updateproportion_postextend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^scanproportion=.*/scanproportion=$scanproportion_postextend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^insertproportion=.*/insertproportion=$insertproportion_postextend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_postextend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_postextend/" $WORKLOAD_FILE
+        source "$WORKLOAD_FILE"
+
+        # Compute new record count
+        updatedrecordcount=$(echo "$recordcount + ($extendoperationcount / 10)" | bc)
+
+        # Setting parameter values for read phase
+        log "=== Setting parameter values for run phase ==="
+        perl -i -p -e "s/^recordcount=.*/recordcount=$updatedrecordcount/" $WORKLOAD_FILE
+        # Change operation count for read mode
+        perl -i -p -e "s/^operationcount=.*/operationcount=$operationcount/" $WORKLOAD_FILE
+        source "$WORKLOAD_FILE" 
+
+        # Execute the run phase
+        log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
+        phase="spread-run"
+        $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
+        measure_stats
+        write_result "FALSE"
+
+    done
+done
+
+log "=== All steps completed. Results are logged in $LOG_FILE ==="
