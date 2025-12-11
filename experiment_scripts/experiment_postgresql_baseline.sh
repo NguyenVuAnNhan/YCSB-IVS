@@ -1,6 +1,6 @@
 #!/bin/bash
 
-YCSB="bin/ycsb.sh"
+YCSB="../bin/ycsb.sh"
 
 # DB names
 DB_NAME="ycsb"
@@ -9,7 +9,7 @@ UNCHANGE_DB_NAME="ycsb_unchange"
 
 # Path to the PostgreSQL data directory
 DB_URL="jdbc:postgresql://localhost:5432/$DB_NAME"
-JDBC_PROPERTIES="jdbc-binding/conf/postgres.properties"
+JDBC_PROPERTIES="../jdbc-binding/conf/postgres.properties"
 DB_USERNAME="ycsb"
 DB_PWD="USyd2025"
 
@@ -93,6 +93,9 @@ write_result() {
         # Extract operation and third value
         operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
         third_value=$(echo "$line" | awk '{print $3}' | sed 's/,$//')
+        # Set default values for epoch and run if not set (e.g., during load phase)
+        epoch=${epoch:-0}
+        run=${run:-0}
         r=$((10 * ($epoch - 1) + $run))
 
         run_specific=()
