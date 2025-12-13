@@ -19,19 +19,32 @@ create_table() {
         );"
 }
 
-common_header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation"
-prop_header="Readprop,Updateprop,Scanprop,Insertprop,Extendprop"
-stats_header="blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full"
-runtime_header="Runtime(ms),Throughput(ops/sec)"
-
-extract_dynamic_fields() {
-    awk '{print $2}' <<< "$filtered_output" \
-    | sed 's/,$//' \
-    | uniq \
-    | awk '{ORS=","; print}'
-}
-
-dynamic_fields="$(extract_dynamic_fields)"
+# Define database-specific binding field names (metrics collected from the database)
+# These should match the variable names set by collect_metrics() function
+binding_field_names=(
+    "blks_read"
+    "blks_hit"
+    "tup_returned"
+    "tup_fetched"
+    "tup_inserted"
+    "tup_updated"
+    "tup_deleted"
+    "deadlocks"
+    "temp_files"
+    "temp_bytes"
+    "checkpoints_timed"
+    "checkpoints_req"
+    "buffers_checkpoint"
+    "buffers_clean"
+    "buffers_backend"
+    "buffers_alloc"
+    "checkpoint_write_time"
+    "checkpoint_sync_time"
+    "wal_bytes"
+    "wal_records"
+    "wal_fpi"
+    "wal_buffers_full"
+)
 
 # Function to close the PostgreSQL database
 close_db() {
@@ -40,7 +53,7 @@ close_db() {
 
 # Function to extract PostgreSQL database and background writer statistics
 collect_postgres_metrics() {
-    local db="$DB_NAME"
+    local db="${1:-$DB_NAME}"
 
     # database-level stats
     read blks_read blks_hit tup_returned tup_fetched tup_inserted tup_updated tup_deleted deadlocks temp_files temp_bytes <<< \
@@ -75,60 +88,13 @@ collect_postgres_metrics() {
 }
 
 measure_stats() {
+    local db="${1:-$DB_NAME}"
     cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
     memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
-    collect_postgres_metrics $DB_NAME
+    collect_postgres_metrics "$db"
 }
 
-common_fields=(
-    "$epoch"
-    "$phase"
-    "$recordcount"
-    "$readallfields"
-    "$requestdistribution"
-)
-
-binding_fields=(
-    "$blks_read"
-    "$blks_hit"
-    "$tup_returned"
-    "$tup_fetched"
-    "$tup_inserted"
-    "$tup_updated"
-    "$tup_deleted"
-    "$deadlocks"
-    "$temp_files"
-    "$temp_bytes"
-    "$checkpoints_timed"
-    "$checkpoints_req"
-    "$buffers_checkpoint"
-    "$buffers_clean"
-    "$buffers_backend"
-    "$buffers_alloc"
-    "$checkpoint_write_time"
-    "$checkpoint_sync_time"
-    "$wal_bytes"
-    "$wal_records"
-    "$wal_fpi"
-    "$wal_buffers_full"
-)
-
-prop_fields=(
-    "$readproportion"
-    "$updateproportion"
-    "$scanproportion"
-    "$insertproportion"
-    "$extendproportion"
-)
-
-dynamic_fields=("${run_specific[@]}" "$third_value")
-
-final_row = (
-    "${common_fields[@]}"
-    "${binding_fields[@]}"
-    "${prop_fields[@]}"
-    "${dynamic_fields[@]}"
-)
+# Field arrays will be populated dynamically in write_result function
 
 run_ycsb_load() {
     $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
@@ -140,7 +106,9 @@ run_ycsb_run() {
 
 #----------------------------------------------------------#
 
-YCSB="bin/ycsb.sh"
+######Constants######
+
+YCSB="../bin/ycsb.sh"
 
 # DB names
 DB_NAME="ycsb"
@@ -149,7 +117,7 @@ UNCHANGE_DB_NAME="ycsb_unchange"
 
 # Path to the PostgreSQL data directory
 DB_URL="jdbc:postgresql://localhost:5432/$DB_NAME"
-JDBC_PROPERTIES="jdbc-binding/conf/postgres.properties"
+JDBC_PROPERTIES="../jdbc-binding/conf/postgres.properties"
 DB_USERNAME="ycsb"
 DB_PWD="USyd2025"
 
@@ -183,28 +151,25 @@ requestdistribution_postextend="uniform"
 fieldlengthoriginal="100"
 extendoperationcount="10000"
 
-# Initialize PostgreSQL database
-initialize_database() {
-    echo "Initializing PostgreSQL database $DB_NAME..."
+#----------------------------------------------------------#
 
-    drop_database
+######Helper functions######
 
-    create_database
+# Generate stats_header from binding_field_names
+stats_header=$(IFS=','; echo "${binding_field_names[*]}")
 
-    create_table
+# Constant headers (not database-specific)
+common_header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation"
+prop_header="Readprop,Updateprop,Scanprop,Insertprop,Extendprop"
+runtime_header="Runtime(ms),Throughput(ops/sec)"
 
-    echo "Done initializing."
+extract_dynamic_fields() {
+    local filtered_output="$1"
+    awk '{print $2}' <<< "$filtered_output" \
+    | sed 's/,$//' \
+    | uniq \
+    | awk '{ORS=","; print}'
 }
-
-initialize_database
-
-# Function to log and print messages
-log() {
-    echo "$1" | tee -a $LOG_FILE
-}
-
-# Clear the log file
-> $LOG_FILE
 
 # Function to write results as a csv 
 write_result() {
@@ -215,7 +180,8 @@ write_result() {
 
     if [ "$first" == "TRUE" ]; then   
         # Extract unique second values (except the first one) and create header
-        header="$common_header,$stats_header,$prop_header,$runtime_header,$dynamic_fields"
+        dynamic_fields_header=$(extract_dynamic_fields "$filtered_output")
+        header="$common_header,$stats_header,$prop_header,$runtime_header,$dynamic_fields_header"
         echo "$header" > "$OUTPUT_FILE"
     fi
 
@@ -225,6 +191,18 @@ write_result() {
     k=1
     p=1
     prev_operation=""
+    # Set default values for epoch and run if not set (e.g., during load phase)
+    epoch=${epoch:-0}
+    run=${run:-0}
+    recordcount=${recordcount:-$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
+    readallfields=${readallfields:-$(grep -E '^readallfields=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
+    requestdistribution=${requestdistribution:-$(grep -E '^requestdistribution=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
+    readproportion=${readproportion:-$(grep -E '^readproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
+    updateproportion=${updateproportion:-$(grep -E '^updateproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
+    scanproportion=${scanproportion:-$(grep -E '^scanproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
+    insertproportion=${insertproportion:-$(grep -E '^insertproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
+    extendproportion=${extendproportion:-$(grep -E '^extendproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
+    
     while IFS= read -r line; do
         # Extract operation and third value
         operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
@@ -238,6 +216,32 @@ write_result() {
             tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
             run_specific+=("$tmp")
         done <<< "$overall_output"
+
+        # Populate field arrays dynamically
+        common_fields=(
+            "$r"
+            "$phase"
+            "$recordcount"
+            "$readallfields"
+            "$requestdistribution"
+        )
+
+        # Populate binding_fields from database-specific metrics using binding_field_names
+        binding_fields=()
+        for field_name in "${binding_field_names[@]}"; do
+            # Use indirect variable reference to get the value
+            binding_fields+=("${!field_name}")
+        done
+
+        prop_fields=(
+            "$readproportion"
+            "$updateproportion"
+            "$scanproportion"
+            "$insertproportion"
+            "$extendproportion"
+        )
+
+        dynamic_fields=("${run_specific[@]}" "$third_value")
 
         # Append to the values variable
         if [ $k -eq 1 ]; then
@@ -281,6 +285,34 @@ write_result() {
     echo "Arrangement completed. Output saved to $OUTPUT_FILE"
 
 }
+
+# Initialize database
+initialize_database() {
+    echo "Initializing database $DB_NAME..."
+
+    drop_database
+
+    create_database
+
+    create_table
+
+    echo "Done initializing."
+}
+
+# Function to log and print messages
+log() {
+    echo "$1" | tee -a $LOG_FILE
+}
+
+
+#----------------------------------------------------------#
+
+######Main block of code######
+
+initialize_database
+
+# Clear the log file
+> $LOG_FILE
 
 # Execute the load phase
 log "=== Executing the load phase ==="
