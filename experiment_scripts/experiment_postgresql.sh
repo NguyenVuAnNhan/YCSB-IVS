@@ -1,6 +1,6 @@
 #!/bin/bash
 
-YCSB="bin/ycsb.sh"
+YCSB="../bin/ycsb.sh"
 
 # DB names
 DB_NAME="ycsb"
@@ -9,7 +9,7 @@ UNCHANGE_DB_NAME="ycsb_unchange"
 
 # Path to the PostgreSQL data directory
 DB_URL="jdbc:postgresql://localhost:5432/$DB_NAME"
-JDBC_PROPERTIES="jdbc-binding/conf/postgres.properties"
+JDBC_PROPERTIES="../jdbc-binding/conf/postgres.properties"
 DB_USERNAME="ycsb"
 DB_PWD="USyd2025"
 BACKUP_URL="jdbc:postgresql://localhost:5432/$BACKUP_DB_NAME"
@@ -54,22 +54,24 @@ extendoperationcount="10000"
 
 # Initialize PostgreSQL database
 initialize_database() {
-    echo "Initializing PostgreSQL database $DB_NAME..."
+    local db_name="$1"
+    echo "Initializing PostgreSQL database $db_name..."
 
-    PGPASSWORD="$DB_PWD" dropdb --if-exists "$DB_NAME" -U "$DB_USERNAME"
-    PGPASSWORD="$DB_PWD" createdb "$DB_NAME" -U "$DB_USERNAME"
+    PGPASSWORD="$DB_PWD" dropdb --if-exists "$db_name" -U "$DB_USERNAME"
+    PGPASSWORD="$DB_PWD" createdb "$db_name" -U "$DB_USERNAME"
 
-    PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c \
+    PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -c \
         "CREATE TABLE usertable (
             ycsb_key TEXT PRIMARY KEY,
             field0 TEXT, field1 TEXT, field2 TEXT, field3 TEXT, field4 TEXT,
             field5 TEXT, field6 TEXT, field7 TEXT, field8 TEXT, field9 TEXT
         );"
 
-    echo "Done initializing."
+    echo "Done initializing $db_name."
 }
 
-initialize_database
+initialize_database "$DB_NAME"
+initialize_database "$UNCHANGE_DB_NAME"
 
 # Function to log and print messages
 log() {
@@ -302,7 +304,7 @@ delete_new_keys() {
 
 # Function to extract PostgreSQL database and background writer statistics
 collect_postgres_metrics() {
-    local db="$DB_NAME"
+    local db="${1:-$DB_NAME}"
 
     # database-level stats
     read blks_read blks_hit tup_returned tup_fetched tup_inserted tup_updated tup_deleted deadlocks temp_files temp_bytes <<< \
@@ -420,7 +422,7 @@ for epoch in $(seq 1 10); do
 
         # Save the existing keys in the database
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
-        -c "SELECT YCSB_KEY
+        -c "SELECT ycsb_key
             FROM usertable;" | tail -n +2 > keys.txt
 
         # Execute the run phase
@@ -446,13 +448,13 @@ for epoch in $(seq 1 10); do
 
         # Now delete those keys from PostgreSQL
         while read key; do
-          echo "DELETE FROM usertable WHERE YCSB_KEY='$key';"
+          echo "DELETE FROM usertable WHERE ycsb_key='$key';"
         done < keys_to_delete.txt | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME"
 
         rm -rf keys_after_run.txt keys.txt keys_after_sorted.txt keys_to_delete.txt
 
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" -At -F"," \
-        -c "SELECT YCSB_KEY
+        -c "SELECT ycsb_key
             FROM usertable;" | tail -n +2 > keys.txt
 
         # Workload with unchanging value sizes
@@ -460,12 +462,12 @@ for epoch in $(seq 1 10); do
         $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$UNCHANGE_DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE"  > $OUTPUT_CSV
         cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
         memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
-        collect_postgres_metrics $DB_NAME
+        collect_postgres_metrics $UNCHANGE_DB_NAME
         write_result "FALSE"
 
         # Save the existing keys in the database to remove duplicates later
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" -At -F"," \
-        -c "SELECT YCSB_KEY
+        -c "SELECT ycsb_key
             FROM usertable;" | tail -n +2 > keys_after_run.txt
 
         # Sort both files
@@ -477,7 +479,7 @@ for epoch in $(seq 1 10); do
 
         # Now delete those keys from PostgreSQL
         while read key; do
-          echo "DELETE FROM usertable WHERE YCSB_KEY='$key';"
+          echo "DELETE FROM usertable WHERE ycsb_key='$key';"
         done < keys_to_delete.txt | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME"
 
         rm -rf keys_after_run.txt keys.txt keys_after_sorted.txt keys_to_delete.txt
@@ -486,15 +488,19 @@ for epoch in $(seq 1 10); do
             phase="clean-run"
             
             echo "Backing up the database started"
-            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c "
-            DROP DATABASE IF EXISTS $BACKUP_DB_NAME; 
-            CREATE DATABASE $BACKUP_DB_NAME; 
-            GRANT ALL PRIVILEGES ON $BACKUP_DB_NAME.* TO '$DB_USERNAME'@'localhost';"
+            PGPASSWORD="$DB_PWD" dropdb --if-exists "$BACKUP_DB_NAME" -U "$DB_USERNAME"
+            PGPASSWORD="$DB_PWD" createdb "$BACKUP_DB_NAME" -U "$DB_USERNAME"
 
             # Dump primary DB into file
             PGPASSWORD="$DB_PWD" pg_dump -U "$DB_USERNAME" -d "$DB_NAME" > "$BACKUP_FILE"
 
-            # Restore backup
+            # Restore backup - create table first, then restore data
+            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -c \
+                "CREATE TABLE usertable (
+                    ycsb_key TEXT PRIMARY KEY,
+                    field0 TEXT, field1 TEXT, field2 TEXT, field3 TEXT, field4 TEXT,
+                    field5 TEXT, field6 TEXT, field7 TEXT, field8 TEXT, field9 TEXT
+                );"
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -f "$BACKUP_FILE"
             echo "Backing up the database finished"
 
@@ -543,7 +549,7 @@ for epoch in $(seq 1 10); do
                 octet_length(field3) + octet_length(field4) + octet_length(field5) +
                 octet_length(field6) + octet_length(field7) + octet_length(field8) +
                 octet_length(field9)
-            ) FROM usertable;" -s -N)
+            ) FROM usertable;" -s)
 
             # Set average field length
             fieldlengthaverage=$(echo "$total_size / (10 * $recordcount)" | bc)
