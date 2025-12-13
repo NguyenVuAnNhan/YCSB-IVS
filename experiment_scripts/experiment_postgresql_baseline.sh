@@ -79,9 +79,38 @@ write_result() {
 
     if [ "$first" == "TRUE" ]; then   
         # Extract unique second values (except the first one) and create header
-        header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec),$(awk '{print $2}' <<< "$filtered_output" | sed 's/,$//' | uniq | awk '{ORS=","; print}')"
+        # Remove trailing comma from header
+        header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec),$(awk '{print $2}' <<< "$filtered_output" | sed 's/,$//' | uniq | awk '{ORS=","; print}' | sed 's/,$//')"
         echo "$header" > "$OUTPUT_FILE"
     fi
+
+    # Set default values for epoch and run if not set (e.g., during load phase)
+    epoch=${epoch:-0}
+    run=${run:-0}
+    # Handle load phase: use 0 instead of negative value
+    if [ "$phase" == "load" ]; then
+        r=0
+    else
+        r=$((10 * ($epoch - 1) + $run))
+    fi
+
+    # Set default values for workload parameters if not set
+    recordcount=${recordcount:-""}
+    readallfields=${readallfields:-""}
+    requestdistribution=${requestdistribution:-""}
+    readproportion=${readproportion:-""}
+    updateproportion=${updateproportion:-""}
+    scanproportion=${scanproportion:-""}
+    insertproportion=${insertproportion:-""}
+    extendproportion=${extendproportion:-""}
+
+    # Extract runtime and throughput from overall output
+    run_specific=()
+    while IFS= read -r inner_line; do
+        # Extract third value (the metric value)
+        tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
+        run_specific+=("$tmp")
+    done <<< "$overall_output"
 
     # Iterate through each line
     values_1=""
@@ -93,94 +122,16 @@ write_result() {
         # Extract operation and third value
         operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
         third_value=$(echo "$line" | awk '{print $3}' | sed 's/,$//')
-        # Set default values for epoch and run if not set (e.g., during load phase)
-        epoch=${epoch:-0}
-        run=${run:-0}
-        r=$((10 * ($epoch - 1) + $run))
 
-        run_specific=()
-        # Extract throughput
-        while IFS= read -r inner_line; do
-            # Extract third value
-            tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
-            run_specific+=("$tmp")
-        done <<< "$overall_output"
-
-        # Append to the values variable
+        # Build CSV row without line continuations to avoid whitespace issues
         if [ $k -eq 1 ]; then
-            values_1="$r,\
-            $phase,\
-            $recordcount,\
-            $readallfields,\
-            $requestdistribution,\
-            $operation,\
-            $blks_read,\
-            $blks_hit,\
-            $tup_returned,\
-            $tup_fetched,\
-            $tup_inserted,\
-            $tup_updated,\
-            $tup_deleted,\
-            $deadlocks,\
-            $temp_files,\
-            $temp_bytes,\
-            $checkpoints_timed,\
-            $checkpoints_req,\
-            $buffers_checkpoint,\
-            $buffers_clean,\
-            $buffers_backend,\
-            $buffers_alloc,\
-            $checkpoint_write_time,\
-            $checkpoint_sync_time,\
-            $wal_bytes,\
-            $wal_records,\
-            $wal_fpi,\
-            $wal_buffers_full,\
-            $readproportion,\
-            $updateproportion,\
-            $scanproportion,\
-            $insertproportion,\
-            $extendproportion,\
-            ${run_specific[0]},${run_specific[1]},$third_value"
+            values_1="$r,$phase,$recordcount,$readallfields,$requestdistribution,$operation,$blks_read,$blks_hit,$tup_returned,$tup_fetched,$tup_inserted,$tup_updated,$tup_deleted,$deadlocks,$temp_files,$temp_bytes,$checkpoints_timed,$checkpoints_req,$buffers_checkpoint,$buffers_clean,$buffers_backend,$buffers_alloc,$checkpoint_write_time,$checkpoint_sync_time,$wal_bytes,$wal_records,$wal_fpi,$wal_buffers_full,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
             k=$((k + 1))
             prev_operation="$operation"
         elif [ $p -eq 1 ] && [ "$prev_operation" == "$operation" ]; then
             values_1="$values_1,$third_value"
         elif [ $p -eq 1 ] && [ "$prev_operation" != "$operation" ]; then
-            values_2="$r,\
-            $phase,\
-            $recordcount,\
-            $readallfields,\
-            $requestdistribution,\
-            $operation,\
-            $blks_read,\
-            $blks_hit,\
-            $tup_returned,\
-            $tup_fetched,\
-            $tup_inserted,\
-            $tup_updated,\
-            $tup_deleted,\
-            $deadlocks,\
-            $temp_files,\
-            $temp_bytes,\
-            $checkpoints_timed,\
-            $checkpoints_req,\
-            $buffers_checkpoint,\
-            $buffers_clean,\
-            $buffers_backend,\
-            $buffers_alloc,\
-            $checkpoint_write_time,\
-            $checkpoint_sync_time,\
-            $wal_bytes,\
-            $wal_records,\
-            $wal_fpi,\
-            $wal_buffers_full,\
-            $readproportion,\
-            $updateproportion,\
-            $scanproportion,\
-            $insertproportion,\
-            $extendproportion,\
-            ${run_specific[0]},${run_specific[1]},$third_value"
+            values_2="$r,$phase,$recordcount,$readallfields,$requestdistribution,$operation,$blks_read,$blks_hit,$tup_returned,$tup_fetched,$tup_inserted,$tup_updated,$tup_deleted,$deadlocks,$temp_files,$temp_bytes,$checkpoints_timed,$checkpoints_req,$buffers_checkpoint,$buffers_clean,$buffers_backend,$buffers_alloc,$checkpoint_write_time,$checkpoint_sync_time,$wal_bytes,$wal_records,$wal_fpi,$wal_buffers_full,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
             p=$((p + 1))
             prev_operation="$operation"
         else
@@ -188,9 +139,9 @@ write_result() {
         fi
     done <<< "$filtered_output"
 
-    # Print the values to the output file
-    echo "$values_1" >> "$OUTPUT_FILE"
-    echo "$values_2" >> "$OUTPUT_FILE"
+    # Print the values to the output file (only if not empty)
+    [ -n "$values_1" ] && echo "$values_1" >> "$OUTPUT_FILE"
+    [ -n "$values_2" ] && echo "$values_2" >> "$OUTPUT_FILE"
 
     # Print completion message
     echo "Arrangement completed. Output saved to $OUTPUT_FILE"
@@ -206,41 +157,54 @@ close_db() {
 collect_postgres_metrics() {
     local db="$DB_NAME"
 
-    # database-level stats
+    # database-level stats - use -t for tuples only, convert pipes to spaces and trim
     read blks_read blks_hit tup_returned tup_fetched tup_inserted tup_updated tup_deleted deadlocks temp_files temp_bytes <<< \
-        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -t -c "
             SELECT blks_read, blks_hit, tup_returned, tup_fetched,
                    tup_inserted, tup_updated, tup_deleted, deadlocks,
                    temp_files, temp_bytes
             FROM pg_stat_database
             WHERE datname = '$db';
-        ")
+        " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
 
     # bgwriter (checkpoints etc.)
     read checkpoints_timed checkpoints_req buffers_checkpoint buffers_clean buffers_backend buffers_alloc checkpoint_write_time checkpoint_sync_time <<< \
-        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -t -c "
             SELECT checkpoints_timed, checkpoints_req,
                    buffers_checkpoint, buffers_clean,
                    buffers_backend, buffers_alloc,
                    checkpoint_write_time, checkpoint_sync_time
             FROM pg_stat_bgwriter;
-        ")
+        " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
 
     # wal metrics if available
     if PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -c "\d pg_stat_wal" &>/dev/null; then
         read wal_bytes wal_records wal_fpi wal_buffers_full <<< \
-            $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+            $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -t -c "
                 SELECT wal_bytes, wal_records, wal_fpi, wal_buffers_full
                 FROM pg_stat_wal;
-            ")
+            " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
     else
-        wal_bytes=""; wal_records=""; wal_fpi=""; wal_buffers_full=""
+        wal_bytes="0"; wal_records="0"; wal_fpi="0"; wal_buffers_full="0"
     fi
 }
 
 # Execute the load phase
 log "=== Executing the load phase ==="
 phase="load"
+epoch=0
+run=0
+# Extract workload parameters for load phase
+source "$WORKLOAD_FILE"
+recordcount=${recordcount:-""}
+readallfields=${readallfields:-""}
+requestdistribution=${requestdistribution:-""}
+readproportion=${readproportion:-""}
+updateproportion=${updateproportion:-""}
+scanproportion=${scanproportion:-""}
+insertproportion=${insertproportion:-""}
+extendproportion=${extendproportion:-""}
+
 $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV 
 cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
 memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
@@ -248,8 +212,8 @@ collect_postgres_metrics $DB_NAME
 write_result "TRUE"
 
 # Experiment parameters
-for epoch in $(seq 1 10); do
-    for run in $(seq 1 10); do
+for epoch in $(seq 1 3); do
+    for run in $(seq 1 3); do
 
         # Set proportions for insert mode
         log "=== Setting parameter values for extend phase ==="
