@@ -20,7 +20,7 @@ OUTPUT_CSV="../analysis/postgresql_output.csv"
 
 # Define input and output filenames  
 INPUT_FILE="../analysis/postgresql_output.csv"
-OUTPUT_FILE="../analysis/Data/Baseline_data/postgresql_run1_spreadrun_light.csv"
+OUTPUT_FILE="../analysis/Data/Baseline_data/postgresql_run1_spreadrun_heavy.csv"
 
 # Extend phase experiment parameters
 extendproportion_extend="0"
@@ -33,15 +33,15 @@ requestdistribution_extend="uniform"
 
 # After extend phase experiment parameters
 extendproportion_postextend="0"
-readproportion_postextend="0.5"
-updateproportion_postextend="0.5"
+readproportion_postextend="1"
+updateproportion_postextend="0"
 scanproportion_postextend="0"
 insertproportion_postextend="0"
 readmodifywriteproportion_postextend="0"
 requestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="10000"
+extendoperationcount="100000"
 
 # Initialize PostgreSQL database
 initialize_database() {
@@ -74,7 +74,9 @@ log() {
 write_result() {
     local first="$1"
     # Remove rows not starting with specific operations and filter specific operations
-    filtered_output=$(awk '/^\[(INSERT|READ|UPDATE|SCAN|EXTEND)\]/' "$INPUT_FILE")
+    # This matches operations like [READ], [UPDATE], [INSERT], [SCAN], [EXTEND]
+    # It will also match failed operations like [READ-FAILED] if they exist
+    filtered_output=$(awk '/^\[(INSERT|READ|UPDATE|SCAN|EXTEND)/' "$INPUT_FILE")
     overall_output=$(awk '/^\[(OVERALL)\]/' "$INPUT_FILE")
 
     if [ "$first" == "TRUE" ]; then   
@@ -118,6 +120,8 @@ write_result() {
     k=1
     p=1
     prev_operation=""
+    # Initialize operation to empty in case filtered_output is empty
+    operation=""
     while IFS= read -r line; do
         # Extract operation and third value
         operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
@@ -212,8 +216,11 @@ collect_postgres_metrics $DB_NAME
 write_result "TRUE"
 
 # Experiment parameters
-for epoch in $(seq 1 3); do
-    for run in $(seq 1 3); do
+# Save original operationcount before modifying it
+original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+
+for epoch in $(seq 1 10); do
+    for run in $(seq 1 10); do
 
         # Set proportions for insert mode
         log "=== Setting parameter values for extend phase ==="
@@ -224,18 +231,16 @@ for epoch in $(seq 1 3); do
         perl -i -p -e "s/^insertproportion=.*/insertproportion=$insertproportion_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^operationcount=.*/operationcount=$extendoperationcount/" $WORKLOAD_FILE
-        source "$WORKLOAD_FILE"
-
-        # Extract the recordcount and operationcount from the workload file
-        operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+        
+        # Extract the recordcount from the workload file (before modifying operationcount)
         recordcount=$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
         
         # Compute the new record number to be added
         updatedoperationcount=$(echo "($extendoperationcount / 10)" | bc)
 
-        # Change operation count for insert mode
+        # Change operation count for insert mode (extend phase)
         perl -i -p -e "s/^operationcount=.*/operationcount=$updatedoperationcount/" $WORKLOAD_FILE
+        source "$WORKLOAD_FILE"
 
         $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
 
@@ -256,8 +261,8 @@ for epoch in $(seq 1 3); do
         # Setting parameter values for read phase
         log "=== Setting parameter values for run phase ==="
         perl -i -p -e "s/^recordcount=.*/recordcount=$updatedrecordcount/" $WORKLOAD_FILE
-        # Change operation count for read mode
-        perl -i -p -e "s/^operationcount=.*/operationcount=$operationcount/" $WORKLOAD_FILE
+        # Change operation count back to original value for run phase
+        perl -i -p -e "s/^operationcount=.*/operationcount=$original_operationcount/" $WORKLOAD_FILE
         source "$WORKLOAD_FILE" 
 
         # Execute the run phase
