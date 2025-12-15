@@ -1,35 +1,38 @@
 package com.yahoo.yscb.db.neo4j;
 
 import site.ycsb.DB;
+import site.ycsb.DBException;
 import site.ycsb.Status;
+import site.ycsb.ByteIterator;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.Vector;
 
 public class Neo4jClient extends DB {
 
-    private Neo4JConnection conn;
-    private Neo4JClientConfig config;
+    private Neo4jConnection conn;
+    private Neo4jConfig config;
 
     @Override
-    public Status init() throws DBException {
+    public void init() throws DBException {
         Properties props = getProperties();
 
         String url = props.getProperty("url");
         String username = props.getProperty("username");
         String password = props.getProperty("password");
 
-        config = new Neo4JClientConfig(url, username, password);
-        conn = new Neo4JConnection(config);
-
-        return Status.OK;
+        config = new Neo4jConfig(url, username, password);
+        conn = new Neo4jConnection(config);
     }
 
     @Override
-    public Status cleanup() throws DBException {
-        try {
+    public void cleanup() throws DBException {
+        if (conn != null) {
             conn.close();
-        } catch (Exception e) {
-            return Status.ERROR;
         }
-        return Status.OK;
     }
 
     @Override   

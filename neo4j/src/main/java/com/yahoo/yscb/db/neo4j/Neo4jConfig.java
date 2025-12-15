@@ -1,3 +1,5 @@
+package com.yahoo.yscb.db.neo4j;
+
 public class Neo4jConfig {
     private final String url;
     private final String username;

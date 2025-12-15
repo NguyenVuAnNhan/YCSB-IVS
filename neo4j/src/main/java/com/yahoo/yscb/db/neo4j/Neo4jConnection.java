@@ -1,7 +1,20 @@
+package com.yahoo.yscb.db.neo4j;
+
 import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.GraphDatabase;
 import org.neo4j.driver.Session;
+import org.neo4j.driver.Result;
+import org.neo4j.driver.Values;
+
+import site.ycsb.ByteIterator;
+import site.ycsb.Status;
+import site.ycsb.StringByteIterator;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.Vector;
 
 public class Neo4jConnection {
     private final Driver driver;
@@ -37,18 +50,18 @@ public class Neo4jConnection {
 
     public Status read(String table, String key, Set<String> fields, Map<String, ByteIterator> result) {
         try {
-            Result result = session.run(
+            Result queryResult = session.run(
                 "MATCH (n:" + table + " {id: $key}) RETURN n",
                 Values.parameters("key", key)
-            ).single();
+            );
 
-            var node = result.single().get("n").asNode();
+            org.neo4j.driver.types.Node node = queryResult.single().get("n").asNode();
 
             node.asMap().forEach((k, v) -> {
                 result.put(k, new StringByteIterator(v.toString()));
             });
 
-            result.consume();
+            queryResult.consume();
 
             return Status.OK;
 
@@ -92,23 +105,23 @@ public class Neo4jConnection {
 
     public Status scan(String table, String startKey, int recordCount, Set<String> fields, Vector<HashMap<String, ByteIterator>> result) {
         try {
-            Result result = session.run(
+            Result queryResult = session.run(
                 "MATCH (n:" + table + ") " +
                 "WHERE n.id >= $startKey " +
                 "RETURN n ORDER BY n.id LIMIT $limit",
                 Values.parameters("startKey", startKey, "limit", recordCount)
             );
 
-            while (result.hasNext()) {
-                var node = result.next().get("n").asNode();
-                var map = new HashMap<String, ByteIterator>();
+            while (queryResult.hasNext()) {
+                org.neo4j.driver.types.Node node = queryResult.next().get("n").asNode();
+                HashMap<String, ByteIterator> map = new HashMap<String, ByteIterator>();
                 node.asMap().forEach((k, v) ->
                     map.put(k, new StringByteIterator(v.toString()))
                 );
                 result.add(map);
             }
 
-            result.consume();
+            queryResult.consume();
 
             return Status.OK;
 
