@@ -327,7 +327,7 @@ readmodifywriteproportion_postextend="0"
 requestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="10000"
+extendoperationcount="1000"
 
 #----------------------------------------------------------#
 
@@ -346,7 +346,8 @@ extract_dynamic_fields() {
     awk '{print $2}' <<< "$filtered_output" \
     | sed 's/,$//' \
     | uniq \
-    | awk '{ORS=","; print}'
+    | awk '{ORS=","; print}' \
+    | sed 's/,$//'
 }
 
 # Function to write results as a csv 
@@ -359,19 +360,28 @@ write_result() {
     if [ "$first" == "TRUE" ]; then   
         # Extract unique second values (except the first one) and create header
         dynamic_fields_header=$(extract_dynamic_fields "$filtered_output")
-        header="$common_header,$stats_header,$prop_header,$runtime_header,$dynamic_fields_header"
+        if [ -n "$dynamic_fields_header" ]; then
+            header="$common_header,$stats_header,$prop_header,$runtime_header,$dynamic_fields_header"
+        else
+            header="$common_header,$stats_header,$prop_header,$runtime_header"
+        fi
         echo "$header" > "$OUTPUT_FILE"
     fi
 
-    # Iterate through each line
-    values_1=""
-    values_2=""
-    k=1
-    p=1
-    prev_operation=""
     # Set default values for epoch and run if not set (e.g., during load phase)
     epoch=${epoch:-0}
     run=${run:-0}
+    # Sanitize epoch and run to ensure they're single integers (take first line only, remove whitespace)
+    epoch=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+    run=$(echo "$run" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+    # Handle load phase: use 0 instead of negative value
+    if [ "$phase" == "load" ]; then
+        r=0
+    else
+        r=$((10 * (epoch - 1) + run))
+    fi
+
+    # Set default values for workload parameters if not set
     recordcount=${recordcount:-$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
     readallfields=${readallfields:-$(grep -E '^readallfields=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
     requestdistribution=${requestdistribution:-$(grep -E '^requestdistribution=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
@@ -380,20 +390,27 @@ write_result() {
     scanproportion=${scanproportion:-$(grep -E '^scanproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
     insertproportion=${insertproportion:-$(grep -E '^insertproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
     extendproportion=${extendproportion:-$(grep -E '^extendproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    
+
+    # Extract runtime and throughput from overall output
+    run_specific=()
+    while IFS= read -r inner_line; do
+        # Extract third value (the metric value)
+        tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
+        run_specific+=("$tmp")
+    done <<< "$overall_output"
+
+    # Iterate through each line
+    values_1=""
+    values_2=""
+    k=1
+    p=1
+    prev_operation=""
+    # Initialize operation to empty in case filtered_output is empty
+    operation=""
     while IFS= read -r line; do
         # Extract operation and third value
         operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
         third_value=$(echo "$line" | awk '{print $3}' | sed 's/,$//')
-        r=$((10 * ($epoch - 1) + $run))
-
-        run_specific=()
-        # Extract throughput
-        while IFS= read -r inner_line; do
-            # Extract third value
-            tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
-            run_specific+=("$tmp")
-        done <<< "$overall_output"
 
         # Populate field arrays dynamically
         common_fields=(
@@ -402,6 +419,7 @@ write_result() {
             "$recordcount"
             "$readallfields"
             "$requestdistribution"
+            "$operation"
         )
 
         # Populate binding_fields from database-specific metrics using binding_field_names
@@ -430,8 +448,8 @@ write_result() {
                 "${dynamic_fields[@]}"
             )
 
-            # join with commas
-            IFS=',' values_1="${row_fields[*]}"
+            # join with commas (use subshell to avoid affecting global IFS)
+            values_1=$(IFS=','; echo "${row_fields[*]}")
 
             k=$((k + 1))
             prev_operation="$operation"
@@ -445,8 +463,8 @@ write_result() {
                 "${dynamic_fields[@]}"
             )
 
-            # join with commas
-            IFS=',' values_2="${row_fields[*]}"
+            # join with commas (use subshell to avoid affecting global IFS)
+            values_2=$(IFS=','; echo "${row_fields[*]}")
 
             p=$((p + 1))
             prev_operation="$operation"
@@ -455,9 +473,9 @@ write_result() {
         fi
     done <<< "$filtered_output"
 
-    # Print the values to the output file
-    echo "$values_1" >> "$OUTPUT_FILE"
-    echo "$values_2" >> "$OUTPUT_FILE"
+    # Print the values to the output file (only if not empty)
+    [ -n "$values_1" ] && echo "$values_1" >> "$OUTPUT_FILE"
+    [ -n "$values_2" ] && echo "$values_2" >> "$OUTPUT_FILE"
 
     # Print completion message
     echo "Arrangement completed. Output saved to $OUTPUT_FILE"
@@ -585,8 +603,8 @@ write_result "TRUE"
 run_ycsb_load "$UNCHANGE_DB_URL"
 
 # Experiment parameters
-for epoch in $(seq 1 10); do
-    for run in $(seq 1 10); do
+for epoch in $(seq 1 3); do
+    for run in $(seq 1 3); do
 
         # Record operation count from workload configuration file
         opscount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
