@@ -501,6 +501,9 @@ initialize_database "$UNCHANGE_DB_NAME"
 # Clear the log file and previous backups
 > $LOG_FILE
 rm -rf $KEY_SIZE_LOG
+# Clear the value size files to start fresh
+> "$KEY_SIZE_FILE_AFTER_EXTEND"
+> "$KEY_SIZE_FILE_AFTER_RUN"
 
 # Execute the load phase
 log "=== Executing the load phase ==="
@@ -578,19 +581,14 @@ for epoch in $(seq 1 3); do
 
         get_key_sizes "$KEY_SIZE_LOG" "$HISTOGRAM_FILE"
 
-        # Check if the output file exists, if not, create it with headers
         # Sanitize epoch and run for iteration calculation
         epoch_iter=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
         run_iter=$(echo "$run" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
         iteration=$((10 * (epoch_iter - 1) + run_iter))
 
-        if [[ ! -f "$KEY_SIZE_FILE_AFTER_EXTEND" ]]; then
-            # Add header row (Key, Run1, Run2, ...)
-            echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_EXTEND"
-        fi
-
-        # If it's the first iteration, append keys and sizes for the first run
         if [[ "$iteration" -eq 1 ]]; then
+            # First iteration: (re)create file with header and initial data
+            echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_EXTEND"
             append_first_iteration "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_EXTEND"
         else
             append_subsequent_iterations "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_EXTEND"
@@ -678,18 +676,14 @@ for epoch in $(seq 1 3); do
                 FROM usertable;" \
             >> "$KEY_SIZE_LOG"
             
-            # Check if the output file exists, if not, create it with headers
             # Sanitize epoch and run for iteration calculation
             epoch_iter2=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
             run_iter2=$(echo "$run" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
             iteration=$((10 * (epoch_iter2 - 1) + run_iter2))
-            if [[ ! -f "$KEY_SIZE_FILE_AFTER_RUN" ]]; then
-                # Add header row (Key, Run1, Run2, ...)
-                echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_RUN"
-            fi
 
-            # If it's the first iteration, append keys and sizes for the first run
             if [[ "$iteration" -eq 1 ]]; then
+                # First iteration: (re)create file with header and initial data
+                echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_RUN"
                 append_first_iteration "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_RUN"
             else
                 append_subsequent_iterations "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_RUN"
