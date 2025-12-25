@@ -3,18 +3,38 @@
 ######Change database functions to work with a new database here######
 
 drop_database() {
+    local db_url="${1:-$DB_URL}"
     # Neo4j: Delete all nodes with the usertable label
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$DB_URL" "MATCH (n:usertable) DETACH DELETE n;" 2>/dev/null || true
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" "MATCH (n:usertable) DETACH DELETE n;" 2>/dev/null || true
 }
 
 create_database() {
+    local db_url="${1:-$DB_URL}"
     # Verify connection
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$DB_URL" "RETURN 1;" > /dev/null 2>&1 || echo "Warning: Could not connect to Neo4j"
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" "RETURN 1;" > /dev/null 2>&1 || echo "Warning: Could not connect to Neo4j"
 }
 
 create_table() {
+    local db_url="${1:-$DB_URL}"
     # Verify we can run a query
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$DB_URL" "RETURN 1;" > /dev/null 2>&1 || true
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" "RETURN 1;" > /dev/null 2>&1 || true
+
+    # Drop any existing indexes on id property (they conflict with unique constraints)
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+        "DROP INDEX usertable_id IF EXISTS;" \
+        > /dev/null 2>&1 || true
+    
+    # Create unique constraint on id property (this also creates an index automatically)
+    # This ensures global uniqueness of the id column
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+        "CREATE CONSTRAINT unique_usertable_id IF NOT EXISTS FOR (n:usertable) REQUIRE n.id IS UNIQUE;" \
+        > /dev/null 2>&1 || true
+
+    # Optional: show indexes and profile a sample query, as in baseline script
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" "SHOW INDEXES;" > /dev/null 2>&1 || true
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+        "PROFILE MATCH (n:usertable {id: 'user00000042'}) RETURN n;" \
+        > /dev/null 2>&1 || true
 }
 
 # Define database-specific binding field names (metrics collected from the database)
@@ -44,7 +64,7 @@ binding_field_names=(
     "transaction_terminated"
 )
 
-# Function to close the Neo4j database
+# Function to close the database
 close_db() {
     log "Neo4j backend: no manual DB close required."
 }
@@ -178,6 +198,80 @@ collect_neo4j_metrics() {
     transaction_terminated="0"
 }
 
+# Database-specific function to get key sizes
+get_key_sizes_from_db() {
+    local db_url="$1"
+    local key_size_log="$2"
+    
+    echo "ycsb_key,size" > "$key_size_log"
+    # Neo4j: Calculate size as sum of all property values for each node
+    # Properties are stored as field0, field1, ..., field9
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+        "MATCH (n:usertable)
+         RETURN n.id AS ycsb_key,
+                reduce(total = 0, key IN ['field0','field1','field2','field3','field4','field5','field6','field7','field8','field9'] | 
+                    total + CASE WHEN n[key] IS NOT NULL THEN size(toString(n[key])) ELSE 0 END) AS size
+         ORDER BY n.id;" \
+        2>/dev/null | tail -n +2 | sed 's/|/,/' >> "$key_size_log" || true
+}
+
+# Database-specific function to get total size
+get_total_size_from_db() {
+    local db_url="$1"
+    # Neo4j: Calculate total size of all properties (field0-field9)
+    total_size=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+        "MATCH (n:usertable)
+         RETURN sum(reduce(total = 0, key IN ['field0','field1','field2','field3','field4','field5','field6','field7','field8','field9'] | 
+            total + CASE WHEN n[key] IS NOT NULL THEN size(toString(n[key])) ELSE 0 END)) AS total;" \
+        2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
+    echo "${total_size:-0}"
+}
+
+# Database-specific function to get keys from database
+get_keys_from_db() {
+    local db_url="$1"
+    local output_file="$2"
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+        "MATCH (n:usertable) RETURN n.id AS ycsb_key ORDER BY n.id;" \
+        2>/dev/null | tail -n +2 | sed 's/|//' > "$output_file" || true
+}
+
+# Database-specific function to delete keys
+delete_keys_from_db() {
+    local db_url="$1"
+    local keys_file="$2"
+    while read key; do
+        [ -n "$key" ] && cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+            "MATCH (n:usertable {id: '$key'}) DETACH DELETE n;" 2>/dev/null || true
+    done < "$keys_file"
+}
+
+# Database-specific function to backup database
+backup_database() {
+    local source_url="$1"
+    local target_url="$2"
+    local backup_file="$3"
+    
+    # This is a simplified backup
+    echo "Creating Neo4j backup..."
+    
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$source_url" \
+        "MATCH (n:usertable)
+         RETURN n.id AS id, 
+                n.field0 AS field0, n.field1 AS field1, n.field2 AS field2,
+                n.field3 AS field3, n.field4 AS field4, n.field5 AS field5,
+                n.field6 AS field6, n.field7 AS field7, n.field8 AS field8,
+                n.field9 AS field9;" \
+        2>/dev/null > "$backup_file" || true
+}
+
+# Database-specific function to truncate (clear all data)
+truncate_table() {
+    local db_url="$1"
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+        "MATCH (n:usertable) DETACH DELETE n;" 2>/dev/null || true
+}
+
 measure_stats() {
     local db_url="${1:-$DB_URL}"
     cpu=$(ps -u neo4j -o %cpu= 2>/dev/null | awk '{sum += $1} END {print sum+0}' || echo "0")
@@ -186,11 +280,14 @@ measure_stats() {
 }
 
 run_ycsb_load() {
-    $YCSB load neo4j -s -P $WORKLOAD_FILE -p url="$DB_URL" -p username="$DB_USERNAME" -p password="$DB_PWD" > $OUTPUT_CSV 
+    local db_url="${1:-$DB_URL}"
+    $YCSB load neo4j -s -P $WORKLOAD_FILE -p url="$db_url" -p username="$DB_USERNAME" -p password="$DB_PWD" > $OUTPUT_CSV 
 }
 
 run_ycsb_run() {
-    $YCSB run neo4j -s -P $WORKLOAD_FILE -p url="$DB_URL" -p username="$DB_USERNAME" -p password="$DB_PWD" > $OUTPUT_CSV
+    local db_url="${1:-$DB_URL}"
+    local extra_params="${2:-}"
+    $YCSB run neo4j -s -P $WORKLOAD_FILE -p url="$db_url" -p username="$DB_USERNAME" -p password="$DB_PWD" $extra_params > $OUTPUT_CSV
 }
 
 #----------------------------------------------------------#
@@ -209,24 +306,33 @@ UNCHANGE_DB_NAME="ycsb_unchange"
 DB_URL="bolt://localhost:7687"
 DB_USERNAME="neo4j"
 DB_PWD="password"
+BACKUP_URL="bolt://localhost:7687"
+BACKUP_FILE="./ycsb_dump.cypher"
+UNCHANGE_DB_URL="bolt://localhost:7687"
 
 # Define the workload file and the log file
 WORKLOAD_FILE="../workloads/workloada-extend"
 LOG_FILE="./ycsb_neo4j_results.log"
 OUTPUT_CSV="../analysis/neo4j_output.csv"
 
-# Define input and output filenames  
+# Define input and output filenames
 INPUT_FILE="../analysis/neo4j_output.csv"
-OUTPUT_FILE="../analysis/Data/Baseline_data/neo4j_run1_spreadrun_light.csv"
+OUTPUT_FILE="../analysis/Data/Workload_data/neo4j_run1_uniform_light.csv"
+
+# Key size gathering
+KEY_SIZE_LOG="key_sizes.csv"
+KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_neo4j_run1_uniform_light_before.csv"
+KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_neo4j_run1_uniform_light_after.csv"
+HISTOGRAM_FILE="histogram.txt"
 
 # Extend phase experiment parameters
-extendproportion_extend="0"
+extendproportion_extend="1"
 readproportion_extend="0"
 updateproportion_extend="0"
 scanproportion_extend="0"
-insertproportion_extend="1"
+insertproportion_extend="0"
 readmodifywriteproportion_extend="0"
-requestdistribution_extend="uniform"
+requestdistribution_extend="zipfian"
 
 # After extend phase experiment parameters
 extendproportion_postextend="0"
@@ -256,6 +362,7 @@ extract_dynamic_fields() {
     local filtered_output="$1"
     awk '{print $2}' <<< "$filtered_output" \
     | sed 's/,$//' \
+    | grep -v '^Return=ERROR$' \
     | uniq \
     | awk '{ORS=","; print}' \
     | sed 's/,$//'
@@ -292,7 +399,7 @@ write_result() {
         r=$((10 * (epoch - 1) + run))
     fi
 
-    # Set default values for workload parameters if not set
+    # Set default values for workload parameters
     recordcount=${recordcount:-""}
     readallfields=${readallfields:-""}
     requestdistribution=${requestdistribution:-""}
@@ -309,6 +416,11 @@ write_result() {
         tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
         run_specific+=("$tmp")
     done <<< "$overall_output"
+    
+    # Ensure we have at least 2 elements (Runtime and Throughput)
+    # If overall_output was empty, default to empty strings
+    [ ${#run_specific[@]} -eq 0 ] && run_specific=("" "")
+    [ ${#run_specific[@]} -eq 1 ] && run_specific+=("")
 
     # Iterate through each line
     values_1=""
@@ -393,15 +505,95 @@ write_result() {
 
 }
 
+# Function to append values for the first iteration
+append_first_iteration() {
+    local key_size_log="$1"
+    local key_size_file="$2"
+
+    echo "Appending first iteration..."
+    awk -F, 'NR==1 {next} {print $1 "," $2}' "$key_size_log" >> "$key_size_file"
+    echo "First iteration: Appended values from $key_size_log to $key_size_file"
+}
+
+# Function to append sizes for subsequent iterations
+append_subsequent_iterations() {
+    local key_size_log="$1"
+    local key_size_file="$2"
+
+    echo "Appending subsequent iteration $iteration..."
+    awk -F, -v iter="$iteration" '
+        NR==FNR {if (NR > 1) {key_sizes[$1]=$2;} next}  # Read key_sizes from log
+        FNR==1 {print $0 ",Run" iter; next}             # Add new run column in the header
+        ($1 in key_sizes) {print $0 "," key_sizes[$1]}  # Append size for existing key
+        !($1 in key_sizes) {print $0 ",0"}              # If key is not found, append 0
+    ' "$key_size_log" "$key_size_file" > temp.csv
+
+    mv temp.csv "$key_size_file"  # Overwrite the file with updated content
+    echo "Iteration $iteration: Appended new size values from $key_size_log to $key_size_file"
+}
+
+get_key_sizes() {
+    local key_size_log="$1"
+    local histogram_file="$2"
+
+    echo "Generating histogram from key size log: $key_size_log"
+
+    awk -F, '
+        BEGIN {
+            block = 100
+            OFS = "\t"
+        }
+        NR == 1 { next }  # Skip header
+        {
+            size = $2 + 0
+            bucket = int(size / (block * 10 ))   #Converting value length to field length as there are 10 fields
+            histogram[bucket]++
+            if (bucket > max_bucket) max_bucket = bucket
+        }
+        END {
+            print "BlockSize", block > "'"$histogram_file"'"
+            for (i = 0; i <= max_bucket; i++) {
+                count = (i in histogram) ? histogram[i] : 0
+                print i, count >> "'"$histogram_file"'"
+            }
+        }
+    ' "$key_size_log"
+
+    echo "Histogram written to $histogram_file (BlockSize = 100)"
+}
+
+delete_new_keys() {
+    local db_url="$1"
+    local keys_before_file="keys.txt"
+    local keys_after_file="keys_after_run.txt"
+    local keys_to_delete_file="keys_to_delete.txt"
+
+    # Sort the key files
+    sort "$keys_before_file" > keys_sorted.txt
+    sort "$keys_after_file" > keys_after_sorted.txt
+
+    # Find keys that are only in keys_after_run.txt
+    comm -13 keys_sorted.txt keys_after_sorted.txt > "$keys_to_delete_file"
+
+    echo "Deleting $(wc -l < "$keys_to_delete_file") new keys from database..."
+
+    # Delete those keys
+    if [ -s "$keys_to_delete_file" ]; then
+        delete_keys_from_db "$db_url" "$keys_to_delete_file"
+    fi
+
+    rm -rf "$keys_after_file" "$keys_before_file" keys_sorted.txt keys_after_sorted.txt "$keys_to_delete_file"
+    echo "Deletion complete."
+}
+
 # Initialize database
 initialize_database() {
+    local db_url="${1:-$DB_URL}"
     echo "Initializing Neo4j database..."
 
-    drop_database
-
-    create_database
-
-    create_table
+    drop_database "$db_url"
+    create_database "$db_url"
+    create_table "$db_url"
 
     echo "Done initializing."
 }
@@ -411,15 +603,25 @@ log() {
     echo "$1" | tee -a $LOG_FILE
 }
 
-
 #----------------------------------------------------------#
 
 ######Main block of code######
 
-initialize_database
+initialize_database "$DB_URL"
+initialize_database "$UNCHANGE_DB_URL"
 
-# Clear the log file
+# Clear the log file and previous backups
 > $LOG_FILE
+rm -rf "$KEY_SIZE_LOG"
+# Clear the value size files to start fresh
+> "$KEY_SIZE_FILE_AFTER_EXTEND"
+> "$KEY_SIZE_FILE_AFTER_RUN"
+# Initialize histogram file with a default entry to ensure it exists for first extend phase
+# For the first extend phase, all records start at original field length (100 bytes)
+# Bucket calculation: size / (blockSize * 10) = 100 / (100 * 10) = 0.1 -> bucket 0
+# We need at least one non-zero count, so we initialize with a high count for bucket 0
+# This represents all records starting at the original field length
+echo -e "BlockSize\t100\n0\t1000000" > "$HISTOGRAM_FILE"
 
 # Execute the load phase
 log "=== Executing the load phase ==="
@@ -436,25 +638,21 @@ updateproportion=${updateproportion:-""}
 scanproportion=${scanproportion:-""}
 insertproportion=${insertproportion:-""}
 extendproportion=${extendproportion:-""}
-
-run_ycsb_load
-log "=== Load phase completed ==="
-cpu=$(ps -u neo4j -o %cpu= 2>/dev/null | awk '{sum += $1} END {print sum+0}' || echo "0")
-memory=$(ps -u neo4j -o %mem= 2>/dev/null | awk '{sum += $1} END {print sum+0}' || echo "0")
-collect_neo4j_metrics "$DB_URL"
+run_ycsb_load "$DB_URL"
+measure_stats "$DB_URL"
 write_result "TRUE"
-log "=== Load phase results written ==="
+
+# Load unchange value size (reference) DB
+run_ycsb_load "$UNCHANGE_DB_URL"
 
 # Experiment parameters
-# Save original operationcount before modifying it
-original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+for epoch in $(seq 1 1); do
+    for run in $(seq 1 1); do
 
-for epoch in $(seq 1 10); do
-    log "=== Starting epoch $epoch ==="
-    for run in $(seq 1 10); do
-        log "=== Starting epoch $epoch, run $run ==="
-
-        # Set proportions for insert mode
+        # Record operation count from workload configuration file
+        opscount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+        
+        # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
         perl -i -p -e "s/^extendproportion=.*/extendproportion=$extendproportion_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^readproportion=.*/readproportion=$readproportion_extend/" $WORKLOAD_FILE
@@ -463,25 +661,42 @@ for epoch in $(seq 1 10); do
         perl -i -p -e "s/^insertproportion=.*/insertproportion=$insertproportion_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_extend/" $WORKLOAD_FILE
-        
-        # Extract the recordcount from the workload file (before modifying operationcount)
-        recordcount=$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
-        
-        # Compute the new record number to be added
-        updatedoperationcount=$(echo "($extendoperationcount / 10)" | bc)
-
-        # Change operation count for insert mode (extend phase)
-        perl -i -p -e "s/^operationcount=.*/operationcount=$updatedoperationcount/" $WORKLOAD_FILE
+        perl -i -p -e "s/^operationcount=.*/operationcount=$extendoperationcount/" $WORKLOAD_FILE
+        # Set fieldlengthdistribution=histogram for extend phase (needed when using fieldlengthhistogram parameter)
+        grep -q '^fieldlengthdistribution=' "$WORKLOAD_FILE" || echo -e "\nfieldlengthdistribution=histogram" >> "$WORKLOAD_FILE"
+        perl -i -p -e "s/^fieldlengthdistribution=.*/fieldlengthdistribution=histogram/" "$WORKLOAD_FILE"
         source "$WORKLOAD_FILE"
+        # Extract workload parameters after sourcing
+        recordcount=${recordcount:-""}
+        readallfields=${readallfields:-""}
+        requestdistribution=${requestdistribution:-""}
+        readproportion=${readproportion:-""}
+        updateproportion=${updateproportion:-""}
+        scanproportion=${scanproportion:-""}
+        insertproportion=${insertproportion:-""}
+        extendproportion=${extendproportion:-""}
 
-        # Execute the extend phase
-        log "=== Executing the extend phase (epoch=$epoch, run=$run) ==="
+        # Execute the run phase
+        log "=== Executing the run phase with extendproportion=1 and other proportions=0 ==="
         phase="extend"
-        run_ycsb_run
-        cpu=$(ps -u neo4j -o %cpu= 2>/dev/null | awk '{sum += $1} END {print sum+0}' || echo "0")
-        memory=$(ps -u neo4j -o %mem= 2>/dev/null | awk '{sum += $1} END {print sum+0}' || echo "0")
-        collect_neo4j_metrics "$DB_URL"
+        run_ycsb_run "$DB_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
+        measure_stats "$DB_URL"
         write_result "FALSE"
+
+        # Key Sizes
+        echo "Size computation started"
+        get_key_sizes_from_db "$DB_URL" "$KEY_SIZE_LOG"
+        get_key_sizes "$KEY_SIZE_LOG" "$HISTOGRAM_FILE"
+
+        iteration=$((10*($epoch-1)+$run))
+
+        if [[ "$iteration" -eq 1 ]]; then
+            # First iteration: (re)create file with header and initial data
+            echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_EXTEND"
+            append_first_iteration "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_EXTEND"
+        else
+            append_subsequent_iterations "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_EXTEND"
+        fi
 
         # Setting parameter values for run phase
         log "=== Setting parameter values for run phase ==="
@@ -492,31 +707,108 @@ for epoch in $(seq 1 10); do
         perl -i -p -e "s/^insertproportion=.*/insertproportion=$insertproportion_postextend/" $WORKLOAD_FILE
         perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_postextend/" $WORKLOAD_FILE
         perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_postextend/" $WORKLOAD_FILE
+        perl -i -p -e "s/^operationcount=.*/operationcount=$opscount/" $WORKLOAD_FILE
+        grep -q '^fieldlengthdistribution=' "$WORKLOAD_FILE" || echo -e "\nfieldlengthdistribution=histogram" >> "$WORKLOAD_FILE"
         source "$WORKLOAD_FILE"
+        # Extract workload parameters after sourcing
+        recordcount=${recordcount:-""}
+        readallfields=${readallfields:-""}
+        requestdistribution=${requestdistribution:-""}
+        readproportion=${readproportion:-""}
+        updateproportion=${updateproportion:-""}
+        scanproportion=${scanproportion:-""}
+        insertproportion=${insertproportion:-""}
+        extendproportion=${extendproportion:-""}
 
-        # Compute new record count
-        updatedrecordcount=$(echo "$recordcount + ($extendoperationcount / 10)" | bc)
-
-        # Setting parameter values for read phase
-        log "=== Setting parameter values for run phase ==="
-        perl -i -p -e "s/^recordcount=.*/recordcount=$updatedrecordcount/" $WORKLOAD_FILE
-        # Change operation count back to original value for run phase
-        perl -i -p -e "s/^operationcount=.*/operationcount=$original_operationcount/" $WORKLOAD_FILE
-        source "$WORKLOAD_FILE" 
+        # Save the existing keys in the database
+        get_keys_from_db "$DB_URL" "keys.txt"
 
         # Execute the run phase
-        log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 (epoch=$epoch, run=$run) ==="
-        phase="spread-run"
-        run_ycsb_run
-        cpu=$(ps -u neo4j -o %cpu= 2>/dev/null | awk '{sum += $1} END {print sum+0}' || echo "0")
-        memory=$(ps -u neo4j -o %mem= 2>/dev/null | awk '{sum += $1} END {print sum+0}' || echo "0")
-        collect_neo4j_metrics "$DB_URL"
+        log "=== Executing the run phase with extendproportion=0 and readproportion=1 ==="
+        phase="run"
+        run_ycsb_run "$DB_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
+        measure_stats "$DB_URL"
         write_result "FALSE"
-        
-        log "=== Completed epoch $epoch, run $run ==="
 
+        # Delete new keys that were inserted during the run
+        get_keys_from_db "$DB_URL" "keys_after_run.txt"
+        delete_new_keys "$DB_URL"
+
+        # Workload with unchanging value sizes
+        get_keys_from_db "$UNCHANGE_DB_URL" "keys.txt"
+        phase="reference"
+        run_ycsb_run "$UNCHANGE_DB_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
+        measure_stats "$UNCHANGE_DB_URL"
+        write_result "FALSE"
+
+        # Delete new keys from unchange database
+        get_keys_from_db "$UNCHANGE_DB_URL" "keys_after_run.txt"
+        delete_new_keys "$UNCHANGE_DB_URL"
+    
+        if (( $((10*($epoch-1)+$run)) % 1 == 0 )); then
+            phase="clean-run"
+            
+            echo "Backing up the database started"
+            backup_database "$DB_URL" "$BACKUP_URL" "$BACKUP_FILE"
+            echo "Backing up the database finished"
+
+            run_ycsb_run "$BACKUP_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
+            measure_stats "$BACKUP_URL"
+            rm -rf "$BACKUP_FILE"
+            write_result "FALSE"
+
+            # Revert and remove fieldlengthdistribution variable from workload file
+            awk '!/^fieldlengthdistribution=/' "$WORKLOAD_FILE" | awk 'NF || NR == 1' > tmp && mv tmp "$WORKLOAD_FILE"
+
+            # Key Sizes
+            echo "Size computation started"
+            get_key_sizes_from_db "$BACKUP_URL" "$KEY_SIZE_LOG"
+            
+            iteration=$((10*($epoch-1)+$run))
+            if [[ "$iteration" -eq 1 ]]; then
+                # First iteration: (re)create file with header and initial data
+                echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_RUN"
+                append_first_iteration "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_RUN"
+            else
+                append_subsequent_iterations "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_RUN"
+            fi
+
+            # Extract the recordcount from the workload file
+            recordcount=$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+
+            # Get total size and calculate average field length
+            total_size=$(get_total_size_from_db "$BACKUP_URL")
+            fieldlengthaverage=$(echo "$total_size / (10 * $recordcount)" | bc)
+
+            echo "$total_size" "$fieldlengthaverage"
+
+            # Change the value size for comparison
+            perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthaverage/" $WORKLOAD_FILE
+            source "$WORKLOAD_FILE"
+
+            truncate_table "$BACKUP_URL"
+
+            # Resetting the database with new data load
+            log "=== Executing the load phase for the comparison study ==="
+            run_ycsb_load "$BACKUP_URL"
+            
+            # Change the value size back for comparison
+            perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthoriginal/" $WORKLOAD_FILE
+            source "$WORKLOAD_FILE"
+
+            # Execute the run phase
+            log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
+            phase="avg-run"
+            run_ycsb_run "$BACKUP_URL"
+            measure_stats "$BACKUP_URL"
+            write_result "FALSE"
+        fi
     done
-    log "=== Completed epoch $epoch ==="
 done
+
+# Delete intermediate temp files
+# rm -rf $LOG_FILE
+# rm -rf $OUTPUT_CSV
+# rm -rf $KEY_SIZE_LOG
 
 log "=== All steps completed. Results are logged in $LOG_FILE ==="
