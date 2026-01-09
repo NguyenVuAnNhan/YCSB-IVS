@@ -18,6 +18,23 @@ create_table() {
     local db_url="${1:-$DB_URL}"
     # Verify we can run a query
     cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" "RETURN 1;" > /dev/null 2>&1 || true
+
+    # Drop any existing indexes on id property (they conflict with unique constraints)
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+        "DROP INDEX usertable_id IF EXISTS;" \
+        > /dev/null 2>&1 || true
+    
+    # Create unique constraint on id property (this also creates an index automatically)
+    # This ensures global uniqueness of the id column
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+        "CREATE CONSTRAINT unique_usertable_id IF NOT EXISTS FOR (n:usertable) REQUIRE n.id IS UNIQUE;" \
+        > /dev/null 2>&1 || true
+
+    # Optional: show indexes and profile a sample query, as in baseline script
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" "SHOW INDEXES;" > /dev/null 2>&1 || true
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+        "PROFILE MATCH (n:usertable {id: 'user00000042'}) RETURN n;" \
+        > /dev/null 2>&1 || true
 }
 
 # Define database-specific binding field names (metrics collected from the database)
@@ -327,7 +344,7 @@ readmodifywriteproportion_postextend="0"
 requestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="10000"
+extendoperationcount="1000"
 
 #----------------------------------------------------------#
 
@@ -345,8 +362,10 @@ extract_dynamic_fields() {
     local filtered_output="$1"
     awk '{print $2}' <<< "$filtered_output" \
     | sed 's/,$//' \
+    | grep -v '^Return=ERROR$' \
     | uniq \
-    | awk '{ORS=","; print}'
+    | awk '{ORS=","; print}' \
+    | sed 's/,$//'
 }
 
 # Function to write results as a csv 
@@ -359,9 +378,49 @@ write_result() {
     if [ "$first" == "TRUE" ]; then   
         # Extract unique second values (except the first one) and create header
         dynamic_fields_header=$(extract_dynamic_fields "$filtered_output")
-        header="$common_header,$stats_header,$prop_header,$runtime_header,$dynamic_fields_header"
+        if [ -n "$dynamic_fields_header" ]; then
+            header="$common_header,$stats_header,$prop_header,$runtime_header,$dynamic_fields_header"
+        else
+            header="$common_header,$stats_header,$prop_header,$runtime_header"
+        fi
         echo "$header" > "$OUTPUT_FILE"
     fi
+
+    # Set default values for epoch and run if not set (e.g., during load phase)
+    epoch=${epoch:-0}
+    run=${run:-0}
+    # Sanitize epoch and run to ensure they're single integers (take first line only, remove whitespace)
+    epoch=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+    run=$(echo "$run" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+    # Handle load phase: use 0 instead of negative value
+    if [ "$phase" == "load" ]; then
+        r=0
+    else
+        r=$((10 * (epoch - 1) + run))
+    fi
+
+    # Set default values for workload parameters
+    recordcount=${recordcount:-""}
+    readallfields=${readallfields:-""}
+    requestdistribution=${requestdistribution:-""}
+    readproportion=${readproportion:-""}
+    updateproportion=${updateproportion:-""}
+    scanproportion=${scanproportion:-""}
+    insertproportion=${insertproportion:-""}
+    extendproportion=${extendproportion:-""}
+
+    # Extract runtime and throughput from overall output
+    run_specific=()
+    while IFS= read -r inner_line; do
+        # Extract third value (the metric value)
+        tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
+        run_specific+=("$tmp")
+    done <<< "$overall_output"
+    
+    # Ensure we have at least 2 elements (Runtime and Throughput)
+    # If overall_output was empty, default to empty strings
+    [ ${#run_specific[@]} -eq 0 ] && run_specific=("" "")
+    [ ${#run_specific[@]} -eq 1 ] && run_specific+=("")
 
     # Iterate through each line
     values_1=""
@@ -369,31 +428,12 @@ write_result() {
     k=1
     p=1
     prev_operation=""
-    # Set default values for epoch and run if not set (e.g., during load phase)
-    epoch=${epoch:-0}
-    run=${run:-0}
-    recordcount=${recordcount:-$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    readallfields=${readallfields:-$(grep -E '^readallfields=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    requestdistribution=${requestdistribution:-$(grep -E '^requestdistribution=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    readproportion=${readproportion:-$(grep -E '^readproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    updateproportion=${updateproportion:-$(grep -E '^updateproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    scanproportion=${scanproportion:-$(grep -E '^scanproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    insertproportion=${insertproportion:-$(grep -E '^insertproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    extendproportion=${extendproportion:-$(grep -E '^extendproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    
+    # Initialize operation to empty in case filtered_output is empty
+    operation=""
     while IFS= read -r line; do
         # Extract operation and third value
         operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
         third_value=$(echo "$line" | awk '{print $3}' | sed 's/,$//')
-        r=$((10 * ($epoch - 1) + $run))
-
-        run_specific=()
-        # Extract throughput
-        while IFS= read -r inner_line; do
-            # Extract third value
-            tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
-            run_specific+=("$tmp")
-        done <<< "$overall_output"
 
         # Populate field arrays dynamically
         common_fields=(
@@ -402,6 +442,7 @@ write_result() {
             "$recordcount"
             "$readallfields"
             "$requestdistribution"
+            "$operation"
         )
 
         # Populate binding_fields from database-specific metrics using binding_field_names
@@ -430,8 +471,8 @@ write_result() {
                 "${dynamic_fields[@]}"
             )
 
-            # join with commas
-            IFS=',' values_1="${row_fields[*]}"
+            # join with commas (use subshell to avoid affecting global IFS)
+            values_1=$(IFS=','; echo "${row_fields[*]}")
 
             k=$((k + 1))
             prev_operation="$operation"
@@ -445,8 +486,8 @@ write_result() {
                 "${dynamic_fields[@]}"
             )
 
-            # join with commas
-            IFS=',' values_2="${row_fields[*]}"
+            # join with commas (use subshell to avoid affecting global IFS)
+            values_2=$(IFS=','; echo "${row_fields[*]}")
 
             p=$((p + 1))
             prev_operation="$operation"
@@ -455,9 +496,9 @@ write_result() {
         fi
     done <<< "$filtered_output"
 
-    # Print the values to the output file
-    echo "$values_1" >> "$OUTPUT_FILE"
-    echo "$values_2" >> "$OUTPUT_FILE"
+    # Print the values to the output file (only if not empty)
+    [ -n "$values_1" ] && echo "$values_1" >> "$OUTPUT_FILE"
+    [ -n "$values_2" ] && echo "$values_2" >> "$OUTPUT_FILE"
 
     # Print completion message
     echo "Arrangement completed. Output saved to $OUTPUT_FILE"
@@ -571,12 +612,32 @@ initialize_database "$UNCHANGE_DB_URL"
 
 # Clear the log file and previous backups
 > $LOG_FILE
-rm -rf $BACKUP_DIR
-rm -rf $KEY_SIZE_FILE
+rm -rf "$KEY_SIZE_LOG"
+# Clear the value size files to start fresh
+> "$KEY_SIZE_FILE_AFTER_EXTEND"
+> "$KEY_SIZE_FILE_AFTER_RUN"
+# Initialize histogram file with a default entry to ensure it exists for first extend phase
+# For the first extend phase, all records start at original field length (100 bytes)
+# Bucket calculation: size / (blockSize * 10) = 100 / (100 * 10) = 0.1 -> bucket 0
+# We need at least one non-zero count, so we initialize with a high count for bucket 0
+# This represents all records starting at the original field length
+echo -e "BlockSize\t100\n0\t1000000" > "$HISTOGRAM_FILE"
 
 # Execute the load phase
 log "=== Executing the load phase ==="
 phase="load"
+epoch=0
+run=0
+# Extract workload parameters for load phase
+source "$WORKLOAD_FILE"
+recordcount=${recordcount:-""}
+readallfields=${readallfields:-""}
+requestdistribution=${requestdistribution:-""}
+readproportion=${readproportion:-""}
+updateproportion=${updateproportion:-""}
+scanproportion=${scanproportion:-""}
+insertproportion=${insertproportion:-""}
+extendproportion=${extendproportion:-""}
 run_ycsb_load "$DB_URL"
 measure_stats "$DB_URL"
 write_result "TRUE"
@@ -585,8 +646,8 @@ write_result "TRUE"
 run_ycsb_load "$UNCHANGE_DB_URL"
 
 # Experiment parameters
-for epoch in $(seq 1 10); do
-    for run in $(seq 1 10); do
+for epoch in $(seq 1 1); do
+    for run in $(seq 1 1); do
 
         # Record operation count from workload configuration file
         opscount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
@@ -601,7 +662,19 @@ for epoch in $(seq 1 10); do
         perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^operationcount=.*/operationcount=$extendoperationcount/" $WORKLOAD_FILE
+        # Set fieldlengthdistribution=histogram for extend phase (needed when using fieldlengthhistogram parameter)
+        grep -q '^fieldlengthdistribution=' "$WORKLOAD_FILE" || echo -e "\nfieldlengthdistribution=histogram" >> "$WORKLOAD_FILE"
+        perl -i -p -e "s/^fieldlengthdistribution=.*/fieldlengthdistribution=histogram/" "$WORKLOAD_FILE"
         source "$WORKLOAD_FILE"
+        # Extract workload parameters after sourcing
+        recordcount=${recordcount:-""}
+        readallfields=${readallfields:-""}
+        requestdistribution=${requestdistribution:-""}
+        readproportion=${readproportion:-""}
+        updateproportion=${updateproportion:-""}
+        scanproportion=${scanproportion:-""}
+        insertproportion=${insertproportion:-""}
+        extendproportion=${extendproportion:-""}
 
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=1 and other proportions=0 ==="
@@ -615,16 +688,11 @@ for epoch in $(seq 1 10); do
         get_key_sizes_from_db "$DB_URL" "$KEY_SIZE_LOG"
         get_key_sizes "$KEY_SIZE_LOG" "$HISTOGRAM_FILE"
 
-        # Check if the output file exists, if not, create it with headers
         iteration=$((10*($epoch-1)+$run))
 
-        if [[ ! -f "$KEY_SIZE_FILE_AFTER_EXTEND" ]]; then
-            # Add header row (Key, Run1, Run2, ...)
-            echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_EXTEND"
-        fi
-
-        # If it's the first iteration, append keys and sizes for the first run
         if [[ "$iteration" -eq 1 ]]; then
+            # First iteration: (re)create file with header and initial data
+            echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_EXTEND"
             append_first_iteration "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_EXTEND"
         else
             append_subsequent_iterations "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_EXTEND"
@@ -642,6 +710,15 @@ for epoch in $(seq 1 10); do
         perl -i -p -e "s/^operationcount=.*/operationcount=$opscount/" $WORKLOAD_FILE
         grep -q '^fieldlengthdistribution=' "$WORKLOAD_FILE" || echo -e "\nfieldlengthdistribution=histogram" >> "$WORKLOAD_FILE"
         source "$WORKLOAD_FILE"
+        # Extract workload parameters after sourcing
+        recordcount=${recordcount:-""}
+        readallfields=${readallfields:-""}
+        requestdistribution=${requestdistribution:-""}
+        readproportion=${readproportion:-""}
+        updateproportion=${updateproportion:-""}
+        scanproportion=${scanproportion:-""}
+        insertproportion=${insertproportion:-""}
+        extendproportion=${extendproportion:-""}
 
         # Save the existing keys in the database
         get_keys_from_db "$DB_URL" "keys.txt"
@@ -687,15 +764,10 @@ for epoch in $(seq 1 10); do
             echo "Size computation started"
             get_key_sizes_from_db "$BACKUP_URL" "$KEY_SIZE_LOG"
             
-            # Check if the output file exists, if not, create it with headers
             iteration=$((10*($epoch-1)+$run))
-            if [[ ! -f "$KEY_SIZE_FILE_AFTER_RUN" ]]; then
-                # Add header row (Key, Run1, Run2, ...)
-                echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_RUN"
-            fi
-
-            # If it's the first iteration, append keys and sizes for the first run
             if [[ "$iteration" -eq 1 ]]; then
+                # First iteration: (re)create file with header and initial data
+                echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_RUN"
                 append_first_iteration "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_RUN"
             else
                 append_subsequent_iterations "$KEY_SIZE_LOG" "$KEY_SIZE_FILE_AFTER_RUN"

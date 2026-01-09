@@ -55,35 +55,35 @@ close_db() {
 collect_postgres_metrics() {
     local db="${1:-$DB_NAME}"
 
-    # database-level stats
+    # database-level stats - use -t for tuples only, convert pipes to spaces and trim
     read blks_read blks_hit tup_returned tup_fetched tup_inserted tup_updated tup_deleted deadlocks temp_files temp_bytes <<< \
-        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -t -c "
             SELECT blks_read, blks_hit, tup_returned, tup_fetched,
                    tup_inserted, tup_updated, tup_deleted, deadlocks,
                    temp_files, temp_bytes
             FROM pg_stat_database
             WHERE datname = '$db';
-        ")
+        " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
 
     # bgwriter (checkpoints etc.)
     read checkpoints_timed checkpoints_req buffers_checkpoint buffers_clean buffers_backend buffers_alloc checkpoint_write_time checkpoint_sync_time <<< \
-        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -t -c "
             SELECT checkpoints_timed, checkpoints_req,
                    buffers_checkpoint, buffers_clean,
                    buffers_backend, buffers_alloc,
                    checkpoint_write_time, checkpoint_sync_time
             FROM pg_stat_bgwriter;
-        ")
+        " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
 
     # wal metrics if available
     if PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -c "\d pg_stat_wal" &>/dev/null; then
         read wal_bytes wal_records wal_fpi wal_buffers_full <<< \
-            $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -Xt -c "
+            $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -t -c "
                 SELECT wal_bytes, wal_records, wal_fpi, wal_buffers_full
                 FROM pg_stat_wal;
-            ")
+            " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
     else
-        wal_bytes=""; wal_records=""; wal_fpi=""; wal_buffers_full=""
+        wal_bytes="0"; wal_records="0"; wal_fpi="0"; wal_buffers_full="0"
     fi
 }
 
@@ -168,7 +168,8 @@ extract_dynamic_fields() {
     awk '{print $2}' <<< "$filtered_output" \
     | sed 's/,$//' \
     | uniq \
-    | awk '{ORS=","; print}'
+    | awk '{ORS=","; print}' \
+    | sed 's/,$//'
 }
 
 # Function to write results as a csv 
@@ -181,9 +182,44 @@ write_result() {
     if [ "$first" == "TRUE" ]; then   
         # Extract unique second values (except the first one) and create header
         dynamic_fields_header=$(extract_dynamic_fields "$filtered_output")
-        header="$common_header,$stats_header,$prop_header,$runtime_header,$dynamic_fields_header"
+        if [ -n "$dynamic_fields_header" ]; then
+            header="$common_header,$stats_header,$prop_header,$runtime_header,$dynamic_fields_header"
+        else
+            header="$common_header,$stats_header,$prop_header,$runtime_header"
+        fi
         echo "$header" > "$OUTPUT_FILE"
     fi
+
+    # Set default values for epoch and run if not set (e.g., during load phase)
+    epoch=${epoch:-0}
+    run=${run:-0}
+    # Sanitize epoch and run to ensure they're single integers (take first line only, remove whitespace)
+    epoch=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+    run=$(echo "$run" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+    # Handle load phase: use 0 instead of negative value
+    if [ "$phase" == "load" ]; then
+        r=0
+    else
+        r=$((10 * (epoch - 1) + run))
+    fi
+
+    # Set default values for workload parameters if not set
+    recordcount=${recordcount:-""}
+    readallfields=${readallfields:-""}
+    requestdistribution=${requestdistribution:-""}
+    readproportion=${readproportion:-""}
+    updateproportion=${updateproportion:-""}
+    scanproportion=${scanproportion:-""}
+    insertproportion=${insertproportion:-""}
+    extendproportion=${extendproportion:-""}
+
+    # Extract runtime and throughput from overall output
+    run_specific=()
+    while IFS= read -r inner_line; do
+        # Extract third value (the metric value)
+        tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
+        run_specific+=("$tmp")
+    done <<< "$overall_output"
 
     # Iterate through each line
     values_1=""
@@ -191,31 +227,12 @@ write_result() {
     k=1
     p=1
     prev_operation=""
-    # Set default values for epoch and run if not set (e.g., during load phase)
-    epoch=${epoch:-0}
-    run=${run:-0}
-    recordcount=${recordcount:-$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    readallfields=${readallfields:-$(grep -E '^readallfields=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    requestdistribution=${requestdistribution:-$(grep -E '^requestdistribution=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    readproportion=${readproportion:-$(grep -E '^readproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    updateproportion=${updateproportion:-$(grep -E '^updateproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    scanproportion=${scanproportion:-$(grep -E '^scanproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    insertproportion=${insertproportion:-$(grep -E '^insertproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    extendproportion=${extendproportion:-$(grep -E '^extendproportion=' "$WORKLOAD_FILE" | cut -d'=' -f2)}
-    
+    # Initialize operation to empty in case filtered_output is empty
+    operation=""
     while IFS= read -r line; do
         # Extract operation and third value
         operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
         third_value=$(echo "$line" | awk '{print $3}' | sed 's/,$//')
-        r=$((10 * ($epoch - 1) + $run))
-
-        run_specific=()
-        # Extract throughput
-        while IFS= read -r inner_line; do
-            # Extract third value
-            tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
-            run_specific+=("$tmp")
-        done <<< "$overall_output"
 
         # Populate field arrays dynamically
         common_fields=(
@@ -224,6 +241,7 @@ write_result() {
             "$recordcount"
             "$readallfields"
             "$requestdistribution"
+            "$operation"
         )
 
         # Populate binding_fields from database-specific metrics using binding_field_names
@@ -252,8 +270,8 @@ write_result() {
                 "${dynamic_fields[@]}"
             )
 
-            # join with commas
-            IFS=',' values_1="${row_fields[*]}"
+            # join with commas (use subshell to avoid affecting global IFS)
+            values_1=$(IFS=','; echo "${row_fields[*]}")
 
             k=$((k + 1))
             prev_operation="$operation"
@@ -267,8 +285,8 @@ write_result() {
                 "${dynamic_fields[@]}"
             )
 
-            # join with commas
-            IFS=',' values_2="${row_fields[*]}"
+            # join with commas (use subshell to avoid affecting global IFS)
+            values_2=$(IFS=','; echo "${row_fields[*]}")
 
             p=$((p + 1))
             prev_operation="$operation"
@@ -277,9 +295,9 @@ write_result() {
         fi
     done <<< "$filtered_output"
 
-    # Print the values to the output file
-    echo "$values_1" >> "$OUTPUT_FILE"
-    echo "$values_2" >> "$OUTPUT_FILE"
+    # Print the values to the output file (only if not empty)
+    [ -n "$values_1" ] && echo "$values_1" >> "$OUTPUT_FILE"
+    [ -n "$values_2" ] && echo "$values_2" >> "$OUTPUT_FILE"
 
     # Print completion message
     echo "Arrangement completed. Output saved to $OUTPUT_FILE"
@@ -317,14 +335,31 @@ initialize_database
 # Execute the load phase
 log "=== Executing the load phase ==="
 phase="load"
-run_ycsb_load
+epoch=0
+run=0
+# Extract workload parameters for load phase
+source "$WORKLOAD_FILE"
+recordcount=${recordcount:-""}
+readallfields=${readallfields:-""}
+requestdistribution=${requestdistribution:-""}
+readproportion=${readproportion:-""}
+updateproportion=${updateproportion:-""}
+scanproportion=${scanproportion:-""}
+insertproportion=${insertproportion:-""}
+extendproportion=${extendproportion:-""}
 
-measure_stats
+run_ycsb_load
+cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+collect_postgres_metrics $DB_NAME
 write_result "TRUE"
 
 # Experiment parameters
-for epoch in $(seq 1 10); do
-    for run in $(seq 1 10); do
+# Save original operationcount before modifying it
+original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+
+for epoch in $(seq 1 3); do
+    for run in $(seq 1 3); do
 
         # Set proportions for insert mode
         log "=== Setting parameter values for extend phase ==="
@@ -335,18 +370,16 @@ for epoch in $(seq 1 10); do
         perl -i -p -e "s/^insertproportion=.*/insertproportion=$insertproportion_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^operationcount=.*/operationcount=$extendoperationcount/" $WORKLOAD_FILE
-        source "$WORKLOAD_FILE"
-
-        # Extract the recordcount and operationcount from the workload file
-        operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+        
+        # Extract the recordcount from the workload file (before modifying operationcount)
         recordcount=$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
         
         # Compute the new record number to be added
         updatedoperationcount=$(echo "($extendoperationcount / 10)" | bc)
 
-        # Change operation count for insert mode
+        # Change operation count for insert mode (extend phase)
         perl -i -p -e "s/^operationcount=.*/operationcount=$updatedoperationcount/" $WORKLOAD_FILE
+        source "$WORKLOAD_FILE"
 
         run_ycsb_run
 
@@ -367,15 +400,17 @@ for epoch in $(seq 1 10); do
         # Setting parameter values for read phase
         log "=== Setting parameter values for run phase ==="
         perl -i -p -e "s/^recordcount=.*/recordcount=$updatedrecordcount/" $WORKLOAD_FILE
-        # Change operation count for read mode
-        perl -i -p -e "s/^operationcount=.*/operationcount=$operationcount/" $WORKLOAD_FILE
+        # Change operation count back to original value for run phase
+        perl -i -p -e "s/^operationcount=.*/operationcount=$original_operationcount/" $WORKLOAD_FILE
         source "$WORKLOAD_FILE" 
 
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
         phase="spread-run"
         run_ycsb_run
-        measure_stats
+        cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+        memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+        collect_postgres_metrics $DB_NAME
         write_result "FALSE"
 
     done

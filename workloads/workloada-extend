@@ -12,8 +12,6 @@
 # implied. See the License for the specific language governing                                                                                                                    
 # permissions and limitations under the License. See accompanying                                                                                                                 
 # LICENSE file.                                                                                                                                                                   
-
-
 # Yahoo! Cloud System Benchmark
 # Workload A: Update heavy workload
 #   Application example: Session store recording recent actions
@@ -21,20 +19,15 @@
 #   Read/update ratio: 50/50
 #   Default data size: 1 KB records (10 fields, 100 bytes each, plus key)
 #   Request distribution: zipfian
-
-recordcount=101000
-operationcount=10000
+recordcount=500
+operationcount=100
 workload=site.ycsb.workloads.CoreWorkload
-
 readallfields=true
 writeallfields=false
-
 readproportion=1
 updateproportion=0
 scanproportion=0
 insertproportion=0
 extendproportion=0
-
 requestdistribution=uniform
-fieldlength=100
 extendfieldlength=100
