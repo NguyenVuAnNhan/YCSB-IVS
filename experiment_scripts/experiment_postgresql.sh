@@ -1,4 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+export YCSB_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
+export PATH="$YCSB_HOME/bin:$PATH"
 
 YCSB="../bin/ycsb.sh"
 
@@ -39,6 +46,9 @@ scanproportion_extend="0"
 insertproportion_extend="0"
 readmodifywriteproportion_extend="0"
 requestdistribution_extend="uniform"
+# Optional specific request distributions for each operation
+readrequestdistribution_extend="uniform"
+updaterequestdistribution_extend="uniform"
 
 # After extend phase experiment parameters
 extendproportion_postextend="0"

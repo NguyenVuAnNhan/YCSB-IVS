@@ -1,4 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+export YCSB_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
+export PATH="$YCSB_HOME/bin:$PATH"
 
 ######Change database functions to work with a new database here######
 
