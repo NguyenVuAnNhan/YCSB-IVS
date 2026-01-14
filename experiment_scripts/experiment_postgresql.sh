@@ -68,7 +68,7 @@ extendoperationcount="100000"
 # Initialize PostgreSQL database
 initialize_database() {
     local db_name="$1"
-    echo "Initializing PostgreSQL database $db_name..."
+    log "Initializing PostgreSQL database $db_name..."
 
     PGPASSWORD="$DB_PWD" dropdb --if-exists "$db_name" -U "$DB_USERNAME"
     PGPASSWORD="$DB_PWD" createdb "$db_name" -U "$DB_USERNAME"
@@ -80,7 +80,7 @@ initialize_database() {
             field5 TEXT, field6 TEXT, field7 TEXT, field8 TEXT, field9 TEXT
         );"
 
-    echo "Done initializing $db_name."
+    log "Done initializing $db_name."
 }
 
 initialize_database "$DB_NAME"
@@ -193,7 +193,7 @@ write_result() {
     [ -n "$values_2" ] && echo "$values_2" >> "$OUTPUT_FILE"
 
     # Print completion message
-    echo "Arrangement completed. Output saved to $OUTPUT_FILE"
+    log "Arrangement completed. Output saved to $OUTPUT_FILE"
 
 }
 
@@ -207,9 +207,9 @@ append_first_iteration() {
     local key_size_log="$1"
     local key_size_file="$2"
 
-    echo "Appending first iteration..."
+    log "Appending first iteration..."
     awk -F, 'NR==1 {next} {print $1 "," $2}' "$key_size_log" >> "$key_size_file"
-    echo "First iteration: Appended values from $key_size_log to $key_size_file"
+    log "First iteration: Appended values from $key_size_log to $key_size_file"
 }
 
 # Function to append sizes for subsequent iterations
@@ -217,7 +217,7 @@ append_subsequent_iterations() {
     local key_size_log="$1"
     local key_size_file="$2"
 
-    echo "Appending subsequent iteration $iteration..."
+    log "Appending subsequent iteration $iteration..."
     awk -F, -v iter="$iteration" '
         NR==FNR {if (NR > 1) {key_sizes[$1]=$2;} next}  # Read key_sizes from log
         FNR==1 {print $0 ",Run" iter; next}             # Add new run column in the header
@@ -226,7 +226,7 @@ append_subsequent_iterations() {
     ' "$key_size_log" "$key_size_file" > temp.csv
 
     mv temp.csv "$key_size_file"  # Overwrite the file with updated content
-    echo "Iteration $iteration: Appended new size values from $key_size_log to $key_size_file"
+    log "Iteration $iteration: Appended new size values from $key_size_log to $key_size_file"
 }
 
 # Generate histogram from key size log
@@ -234,7 +234,7 @@ get_key_sizes() {
     local key_size_log="$1"
     local histogram_file="$2"
 
-    echo "Generating histogram from key size log: $key_size_log"
+    log "Generating histogram from key size log: $key_size_log"
 
     awk -F, '
         BEGIN {
@@ -257,7 +257,7 @@ get_key_sizes() {
         }
     ' "$key_size_log"
 
-    echo "Histogram written to $histogram_file (BlockSize = 100)"
+    log "Histogram written to $histogram_file (BlockSize = 100)"
 }
 
 delete_new_keys() {
@@ -283,14 +283,14 @@ delete_new_keys() {
   # Find keys that are only in keys_after_run.txt
   comm -13 keys_sorted.txt keys_after_sorted.txt > "$file_to_delete"
 
-  echo "Deleting $(wc -l < "$file_to_delete") new keys from '$table' in database '$db_name'..."
+  log "Deleting $(wc -l < "$file_to_delete") new keys from '$table' in database '$db_name'..."
 
   # Run DELETE statements
   while read -r key; do
     echo "DELETE FROM $table WHERE $key_column='$key';"
   done < "$file_to_delete" | PGPASSWORD="$password" psql -U "$user" -d "$db_name"
 
-  echo "✅ Deletion complete."
+  log "New key deletion complete."
 }
 
 # Function to extract PostgreSQL database and background writer statistics
@@ -398,7 +398,7 @@ for epoch in $(seq 1 10); do
         write_result "FALSE"
 
         # Key Sizes
-        echo "Size computation started"
+        log "Size computation started"
         echo "ycsb_key,size" > "$KEY_SIZE_LOG"
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
         -c "SELECT ycsb_key,
@@ -519,7 +519,7 @@ for epoch in $(seq 1 10); do
         if (( $((10*($epoch-1)+$run)) % 1 == 0 )); then
             phase="clean-run"
             
-            echo "Backing up the database started"
+            log "Backing up the database started"
             PGPASSWORD="$DB_PWD" dropdb --if-exists "$BACKUP_DB_NAME" -U "$DB_USERNAME"
             PGPASSWORD="$DB_PWD" createdb "$BACKUP_DB_NAME" -U "$DB_USERNAME"
 
@@ -528,7 +528,7 @@ for epoch in $(seq 1 10); do
 
             # Restore backup - --clean ensures tables are dropped before creation
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -f "$BACKUP_FILE" > /dev/null 2>&1 || true
-            echo "Backing up the database finished"
+            log "Backing up the database finished"
 
             $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE" > $OUTPUT_CSV
             cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
@@ -541,7 +541,7 @@ for epoch in $(seq 1 10); do
             awk '!/^fieldlengthdistribution=/' "$WORKLOAD_FILE" | awk 'NF || NR == 1' > tmp && mv tmp "$WORKLOAD_FILE"
 
             # Key Sizes
-            echo "Size computation started"
+            log "Size computation started"
             echo "ycsb_key,size" > "$KEY_SIZE_LOG"
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," \
             -c "SELECT ycsb_key,
@@ -580,13 +580,13 @@ for epoch in $(seq 1 10); do
 
             # Set average field length
             if [ -z "$total_size" ] || [ -z "$recordcount" ] || [ "$recordcount" -eq 0 ]; then
-                echo "Warning: Cannot calculate fieldlengthaverage - total_size=$total_size, recordcount=$recordcount"
+                log "Warning: Cannot calculate fieldlengthaverage - total_size=$total_size, recordcount=$recordcount"
                 fieldlengthaverage="$fieldlengthoriginal"
             else
                 fieldlengthaverage=$(echo "$total_size / (10 * $recordcount)" | bc)
             fi
 
-            echo "$total_size" "$fieldlengthaverage"
+            log "Total size: $total_size, Field length average: $fieldlengthaverage"
 
             # Changing the value size for comparison
             perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthaverage/" $WORKLOAD_FILE
