@@ -30,12 +30,12 @@ OUTPUT_CSV="../analysis/postgresql_output.csv"
 
 # Define input and output filenames
 INPUT_FILE="../analysis/postgresql_output.csv"
-OUTPUT_FILE="../analysis/Data/Workload_data/postgresql_run1_uniform_heavy.csv"
+OUTPUT_FILE="../analysis/Data/Workload_data/postgresql_run1_uniform_light.csv"
 
 # Key size gathering
 KEY_SIZE_LOG="key_sizes.csv"
-KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_postgresql_run1_uniform_heavy_before.csv"
-KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_postgresql_run1_uniform_heavy_after.csv"
+KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_postgresql_run1_uniform_light_before.csv"
+KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_postgresql_run1_uniform_light_after.csv"
 HISTOGRAM_FILE="histogram.txt"
 
 # Extend phase experiment parameters
@@ -63,7 +63,12 @@ readrequestdistribution_postextend="uniform"
 updaterequestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="100000"
+extendoperationcount="10000"
+
+# Function to log and print messages
+log() {
+    echo "$1" | tee -a $LOG_FILE
+}
 
 # Initialize PostgreSQL database
 initialize_database() {
@@ -85,11 +90,6 @@ initialize_database() {
 
 initialize_database "$DB_NAME"
 initialize_database "$UNCHANGE_DB_NAME"
-
-# Function to log and print messages
-log() {
-    echo "$1" | tee -a $LOG_FILE
-}
 
 # Clear the log file and previous backups
 > $LOG_FILE
@@ -360,8 +360,8 @@ $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$UNCHANGE_DB
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
 # Experiment parameters
-for epoch in $(seq 1 10); do
-    for run in $(seq 1 10); do
+for epoch in $(seq 1 2); do
+    for run in $(seq 1 2); do
         
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
@@ -391,7 +391,15 @@ for epoch in $(seq 1 10); do
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0.2 and other proportions=0 ==="
         phase="extend"
-        $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE" > $OUTPUT_CSV 
+        # Capture both stdout and stderr to capture status messages
+        $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE" > $OUTPUT_CSV 2>&1
+        
+        # Extract extend failure count from YCSB output (status messages are in the output)
+        extend_failed_count=$(grep -oP 'EXTEND-FAILED: Count=\K\d+' "$OUTPUT_CSV" | head -1 || echo "0")
+        if [ -n "$extend_failed_count" ] && [ "$extend_failed_count" != "0" ]; then
+            log "WARNING: $extend_failed_count EXTEND operations failed during extend phase"
+        fi
+        
         cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
         memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
         collect_postgres_metrics $DB_NAME
@@ -408,6 +416,29 @@ for epoch in $(seq 1 10); do
             octet_length(field9) AS size
             FROM usertable;" \
         >> "$KEY_SIZE_LOG"
+        
+        # Verify extend operations: check min, max, avg sizes to detect extension failures
+        extend_stats=$(awk -F, '
+            NR == 1 { next }
+            {
+                sizes[NR-1] = $2
+                sum += $2
+                count++
+            }
+            END {
+                if (count > 0) {
+                    avg = sum / count
+                    min = sizes[1]
+                    max = sizes[1]
+                    for (i = 2; i <= count; i++) {
+                        if (sizes[i] < min) min = sizes[i]
+                        if (sizes[i] > max) max = sizes[i]
+                    }
+                    printf "Min:%d Max:%d Avg:%.0f", min, max, avg
+                }
+            }
+        ' "$KEY_SIZE_LOG")
+        log "Extend verification - $extend_stats (Expected avg per record: ~$((10 * fieldlengthoriginal)) bytes initially)"
 
         get_key_sizes $KEY_SIZE_LOG $HISTOGRAM_FILE
 
@@ -589,8 +620,15 @@ for epoch in $(seq 1 10); do
             log "Total size: $total_size, Field length average: $fieldlengthaverage"
 
             # Changing the value size for comparison
-            perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthaverage/" $WORKLOAD_FILE
+            if grep -q '^fieldlength=' "$WORKLOAD_FILE"; then
+                perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthaverage/" $WORKLOAD_FILE
+            else
+                echo "fieldlength=$fieldlengthaverage" >> "$WORKLOAD_FILE"
+            fi
             source "$WORKLOAD_FILE"
+            # Verify fieldlength was set correctly
+            actual_fieldlength=$(grep -E '^fieldlength=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+            log "Workload file fieldlength set to: $actual_fieldlength (expected: $fieldlengthaverage)"
 
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" \
             -c "TRUNCATE TABLE usertable;"
@@ -598,6 +636,11 @@ for epoch in $(seq 1 10); do
             # Resetting the database with new data load
             log "=== Executing the load phase for the comparison study ==="
             $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
+            
+            # Verify record sizes after avg-run load
+            iteration=$((10*($epoch-1)+$run))
+            total_size_avg_run=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(field0) + octet_length(field1) + octet_length(field2) + octet_length(field3) + octet_length(field4) + octet_length(field5) + octet_length(field6) + octet_length(field7) + octet_length(field8) + octet_length(field9)) FROM usertable;")
+            log "Avg-run verification - Epoch:$epoch Run:$run Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
             
             # Chainging the value size for comparison
             perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthoriginal/" $WORKLOAD_FILE
