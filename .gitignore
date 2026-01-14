@@ -24,3 +24,6 @@ output*
 .DS_Store
 /differentbin/
 jdbc-binding/lib/postgresql-42.7.8.jar
+ycsb-ec2-bundle.zip
+ycsb-ec2-bundle/
+analysis/
