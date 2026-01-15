@@ -30,12 +30,12 @@ OUTPUT_CSV="../analysis/postgresql_output.csv"
 
 # Define input and output filenames
 INPUT_FILE="../analysis/postgresql_output.csv"
-OUTPUT_FILE="../analysis/Data/Workload_data/postgresql_run1_uniform_light.csv"
+OUTPUT_FILE="../analysis/Data/Workload_data/postgresql_run1_uniform_heavy_mixed.csv"
 
 # Key size gathering
 KEY_SIZE_LOG="key_sizes.csv"
-KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_postgresql_run1_uniform_light_before.csv"
-KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_postgresql_run1_uniform_light_after.csv"
+KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_postgresql_run1_uniform_heavy_before_mixed.csv"
+KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_postgresql_run1_uniform_heavy_after_mixed.csv"
 HISTOGRAM_FILE="histogram.txt"
 
 # Extend phase experiment parameters
@@ -52,8 +52,8 @@ updaterequestdistribution_extend="uniform"
 
 # After extend phase experiment parameters
 extendproportion_postextend="0"
-readproportion_postextend="1"
-updateproportion_postextend="0"
+readproportion_postextend="0.5"
+updateproportion_postextend="0.5"
 scanproportion_postextend="0"
 insertproportion_postextend="0"
 readmodifywriteproportion_postextend="0"
@@ -63,7 +63,7 @@ readrequestdistribution_postextend="uniform"
 updaterequestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="10000"
+extendoperationcount="100000"
 
 # Function to log and print messages
 log() {
@@ -360,8 +360,8 @@ $YCSB load jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$UNCHANGE_DB
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
 # Experiment parameters
-for epoch in $(seq 1 2); do
-    for run in $(seq 1 2); do
+for epoch in $(seq 1 10); do
+    for run in $(seq 1 10); do
         
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
@@ -388,8 +388,8 @@ for epoch in $(seq 1 2); do
         insertproportion=${insertproportion:-""}
         extendproportion=${extendproportion:-""}
 
-        # Execute the run phase
-        log "=== Executing the run phase with extendproportion=0.2 and other proportions=0 ==="
+        # Execute the extend phase
+        log "=== Executing the extend phase with extendproportion=1 and other proportions=0 ==="
         phase="extend"
         # Capture both stdout and stderr to capture status messages
         $YCSB run jdbc -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE" > $OUTPUT_CSV 2>&1
@@ -511,7 +511,7 @@ for epoch in $(seq 1 2); do
 
         # Delete keys from PostgreSQL
         KEYS_TO_DELETE_FILE="$(pwd)/keys_to_delete.txt"
-        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" << EOF
+        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -q -X << EOF
 BEGIN;
 
 CREATE TEMP TABLE temp_keys_to_delete (ycsb_key TEXT) ON COMMIT DROP;
@@ -553,7 +553,7 @@ EOF
 
         # Delete keys from PostgreSQL
         KEYS_TO_DELETE_FILE="$(pwd)/keys_to_delete.txt"
-        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" << EOF
+        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" -q -X << EOF
 BEGIN;
 
 CREATE TEMP TABLE temp_keys_to_delete (ycsb_key TEXT) ON COMMIT DROP;
