@@ -1,51 +1,38 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+###### Neo4j-specific helpers and database functions ######
 
-export YCSB_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
-export PATH="$YCSB_HOME/bin:$PATH"
+# Run a Cypher statement against a specific Neo4j database
+run_cypher() {
+    local db_name="$1"
+    local query="$2"
+    shift 2 || true
+    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$BOLT_URI" -d "$db_name" "$query" "$@"
+}
 
-######Change database functions to work with a new database here######
-
+# Drop a Neo4j database (multi-DB, via system database)
 drop_database() {
-    local db_url="${1:-$DB_URL}"
-    # Neo4j: Delete all nodes with the usertable label
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" "MATCH (n:usertable) DETACH DELETE n;" 2>/dev/null || true
+    local db_name="${1:-$DB_NAME}"
+    run_cypher "system" "DROP DATABASE $db_name IF EXISTS;" >/dev/null 2>&1 || true
 }
 
+# Create a Neo4j database (multi-DB, via system database)
 create_database() {
-    local db_url="${1:-$DB_URL}"
-    # Verify connection
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" "RETURN 1;" > /dev/null 2>&1 || echo "Warning: Could not connect to Neo4j"
+    local db_name="${1:-$DB_NAME}"
+    run_cypher "system" "CREATE DATABASE $db_name IF NOT EXISTS;" >/dev/null 2>&1 || true
 }
 
+# Create the main YCSB table/constraint in a given database
 create_table() {
-    local db_url="${1:-$DB_URL}"
-    # Verify we can run a query
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" "RETURN 1;" > /dev/null 2>&1 || true
-
-    # Drop any existing indexes on id property (they conflict with unique constraints)
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
-        "DROP INDEX usertable_id IF EXISTS;" \
-        > /dev/null 2>&1 || true
-    
-    # Create unique constraint on id property (this also creates an index automatically)
-    # This ensures global uniqueness of the id column
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
-        "CREATE CONSTRAINT unique_usertable_id IF NOT EXISTS FOR (n:usertable) REQUIRE n.id IS UNIQUE;" \
-        > /dev/null 2>&1 || true
-
-    # Optional: show indexes and profile a sample query, as in baseline script
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" "SHOW INDEXES;" > /dev/null 2>&1 || true
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
-        "PROFILE MATCH (n:usertable {id: 'user00000042'}) RETURN n;" \
-        > /dev/null 2>&1 || true
+    local db_name="${1:-$DB_NAME}"
+    # Unique constraint on id for :usertable
+    run_cypher "$db_name" \
+        "CREATE CONSTRAINT usertable_id IF NOT EXISTS FOR (n:usertable) REQUIRE n.id IS UNIQUE;" \
+        >/dev/null 2>&1 || true
 }
 
-# Define database-specific binding field names (metrics collected from the database)
-# These should match the variable names set by collect_metrics() function
+# Define database-specific binding field names (metrics collected from Neo4j)
+# These should match the variable names set by collect_neo4j_metrics() function
 binding_field_names=(
     "page_cache_hits"
     "page_cache_faults"
@@ -76,225 +63,212 @@ close_db() {
     log "Neo4j backend: no manual DB close required."
 }
 
-# Function to extract Neo4j database statistics (Neo4j 5.x)
+# Function to extract Neo4j database statistics
+# For simplicity and robustness, if any metric query fails, we default to 0.
 collect_neo4j_metrics() {
-    local db_url="${1:-$DB_URL}"
-    
-    # Neo4j 5.x metrics collection using latest procedures
-    # Using dbms.queryJmx for comprehensive metrics
-    
-    # Get page cache metrics
-    page_cache_metrics=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+    local db_name="${1:-$DB_NAME}"
+
+    # Defaults
+    page_cache_hits="0"
+    page_cache_faults="0"
+    transaction_commits="0"
+    transaction_rollbacks="0"
+    transaction_peak_concurrent="0"
+    transaction_active="0"
+    nodes_created="0"
+    nodes_deleted="0"
+    relationships_created="0"
+    relationships_deleted="0"
+    properties_set="0"
+    index_hits="0"
+    index_misses="0"
+    lock_acquisition_time="0"
+    lock_wait_time="0"
+    checkpoint_total_time="0"
+    checkpoint_total_events="0"
+    log_rotation_events="0"
+    log_rotation_total_time="0"
+    log_appended_bytes="0"
+    transaction_started="0"
+    transaction_terminated="0"
+
+    # Page cache metrics
+    page_cache_metrics=$(run_cypher "$db_name" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Page cache') YIELD attributes
          RETURN attributes['hits'].value AS hits, attributes['faults'].value AS faults;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    
     if [ -n "$page_cache_metrics" ]; then
         page_cache_hits=$(echo "$page_cache_metrics" | cut -d'|' -f1)
         page_cache_faults=$(echo "$page_cache_metrics" | cut -d'|' -f2)
-    else
-        page_cache_hits="0"
-        page_cache_faults="0"
     fi
-    
-    # Get transaction metrics
-    tx_metrics=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+
+    # Transaction metrics
+    tx_metrics=$(run_cypher "$db_name" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Transactions') YIELD attributes
          RETURN attributes['NumberOfCommittedTransactions'].value AS commits,
                 attributes['NumberOfRolledBackTransactions'].value AS rollbacks,
                 attributes['PeakNumberOfConcurrentTransactions'].value AS peak_concurrent;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    
     if [ -n "$tx_metrics" ]; then
         transaction_commits=$(echo "$tx_metrics" | cut -d'|' -f1)
         transaction_rollbacks=$(echo "$tx_metrics" | cut -d'|' -f2)
         transaction_peak_concurrent=$(echo "$tx_metrics" | cut -d'|' -f3)
-    else
-        transaction_commits="0"
-        transaction_rollbacks="0"
-        transaction_peak_concurrent="0"
     fi
-    
-    # Get current transaction count
-    tx_active=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+
+    # Current transaction count
+    tx_active=$(run_cypher "$db_name" \
         "SHOW TRANSACTIONS YIELD transactionId RETURN count(*) AS count;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
     transaction_active="${tx_active:-0}"
-    
-    # Get database operations metrics
-    db_ops=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+
+    # Primitive counts
+    db_ops=$(run_cypher "$db_name" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Primitive count') YIELD attributes
          RETURN attributes['NumberOfNodeIdsInUse'].value AS nodes,
                 attributes['NumberOfRelationshipIdsInUse'].value AS relationships,
                 attributes['NumberOfPropertyIdsInUse'].value AS properties;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    
     if [ -n "$db_ops" ]; then
         nodes_created=$(echo "$db_ops" | cut -d'|' -f1)
         relationships_created=$(echo "$db_ops" | cut -d'|' -f2)
         properties_set=$(echo "$db_ops" | cut -d'|' -f3)
-    else
-        nodes_created="0"
-        relationships_created="0"
-        properties_set="0"
     fi
-    
-    # Get index metrics
-    index_metrics=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
-        "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Index sampling') YIELD attributes
-         RETURN attributes['IndexSamplingJobCount'].value AS sampling_count;" \
-        2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    
-    # Try to get index hits/misses from index statistics
-    index_stats=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
-        "SHOW INDEXES YIELD name, state, type, populationPercent;" \
-        2>/dev/null | wc -l)
-    index_hits="0"
-    index_misses="0"
-    
-    # Get lock metrics
-    lock_metrics=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
-        "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Locking') YIELD attributes
-         RETURN attributes['NumberOfLockedEntities'].value AS locked;" \
-        2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    
-    lock_acquisition_time="0"
-    lock_wait_time="0"
-    
-    # Get checkpoint metrics
-    checkpoint_metrics=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+
+    # Checkpoint metrics
+    checkpoint_metrics=$(run_cypher "$db_name" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Check pointing') YIELD attributes
          RETURN attributes['CheckPointTotalTime'].value AS total_time,
                 attributes['NumberOfCheckPointEvents'].value AS events;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    
     if [ -n "$checkpoint_metrics" ]; then
         checkpoint_total_time=$(echo "$checkpoint_metrics" | cut -d'|' -f1)
         checkpoint_total_events=$(echo "$checkpoint_metrics" | cut -d'|' -f2)
-    else
-        checkpoint_total_time="0"
-        checkpoint_total_events="0"
     fi
-    
-    # Get log rotation metrics
-    log_metrics=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+
+    # Log rotation metrics
+    log_metrics=$(run_cypher "$db_name" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Log rotation') YIELD attributes
          RETURN attributes['LogRotationEvents'].value AS events,
                 attributes['LogRotationTotalTime'].value AS total_time;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    
     if [ -n "$log_metrics" ]; then
         log_rotation_events=$(echo "$log_metrics" | cut -d'|' -f1)
         log_rotation_total_time=$(echo "$log_metrics" | cut -d'|' -f2)
-    else
-        log_rotation_events="0"
-        log_rotation_total_time="0"
     fi
-    
-    # Get log appended bytes
-    log_appended_bytes=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+
+    # Store log file size (approximation for appended bytes)
+    log_appended_bytes=$(run_cypher "$db_name" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Store file sizes') YIELD attributes
          RETURN attributes['LogFileSize'].value AS size;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
     log_appended_bytes="${log_appended_bytes:-0}"
-    
-    # Set defaults for metrics that might not be available
-    nodes_deleted="0"
-    relationships_deleted="0"
-    transaction_started="0"
-    transaction_terminated="0"
 }
 
-# Database-specific function to get key sizes
+# Database-specific function to get key sizes (appends to file, caller should create header)
 get_key_sizes_from_db() {
-    local db_url="$1"
+    local db_name="$1"
     local key_size_log="$2"
-    
-    echo "ycsb_key,size" > "$key_size_log"
-    # Neo4j: Calculate size as sum of all property values for each node
-    # Properties are stored as field0, field1, ..., field9
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+
+    run_cypher "$db_name" \
         "MATCH (n:usertable)
          RETURN n.id AS ycsb_key,
-                reduce(total = 0, key IN ['field0','field1','field2','field3','field4','field5','field6','field7','field8','field9'] | 
-                    total + CASE WHEN n[key] IS NOT NULL THEN size(toString(n[key])) ELSE 0 END) AS size
+                reduce(total = 0, k IN ['field0','field1','field2','field3','field4','field5','field6','field7','field8','field9'] |
+                    total + CASE WHEN n[k] IS NOT NULL THEN size(toString(n[k])) ELSE 0 END) AS size
          ORDER BY n.id;" \
-        2>/dev/null | tail -n +2 | sed 's/|/,/' >> "$key_size_log" || true
+        2>/dev/null | tail -n +2 | sed 's/|/,/' >> "$key_size_log"
 }
 
 # Database-specific function to get total size
 get_total_size_from_db() {
-    local db_url="$1"
-    # Neo4j: Calculate total size of all properties (field0-field9)
-    total_size=$(cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
+    local db_name="$1"
+    run_cypher "$db_name" \
         "MATCH (n:usertable)
-         RETURN sum(reduce(total = 0, key IN ['field0','field1','field2','field3','field4','field5','field6','field7','field8','field9'] | 
-            total + CASE WHEN n[key] IS NOT NULL THEN size(toString(n[key])) ELSE 0 END)) AS total;" \
-        2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    echo "${total_size:-0}"
+         RETURN sum(reduce(total = 0, k IN ['field0','field1','field2','field3','field4','field5','field6','field7','field8','field9'] |
+            total + CASE WHEN n[k] IS NOT NULL THEN size(toString(n[k])) ELSE 0 END)) AS total;" \
+        2>/dev/null | tail -n +2 | head -1 | tr -d ' '
 }
 
 # Database-specific function to get keys from database
 get_keys_from_db() {
-    local db_url="$1"
+    local db_name="$1"
     local output_file="$2"
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
-        "MATCH (n:usertable) RETURN n.id AS ycsb_key ORDER BY n.id;" \
-        2>/dev/null | tail -n +2 | sed 's/|//' > "$output_file" || true
+    run_cypher "$db_name" \
+        "MATCH (n:usertable) RETURN n.id AS ycsb_key;" \
+        2>/dev/null | tail -n +2 | sed 's/|//' > "$output_file"
 }
 
 # Database-specific function to delete keys
-delete_keys_from_db() {
-    local db_url="$1"
-    local keys_file="$2"
-    while read key; do
-        [ -n "$key" ] && cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
-            "MATCH (n:usertable {id: '$key'}) DETACH DELETE n;" 2>/dev/null || true
-    done < "$keys_file"
+delete_batch_neo4j() {
+  local db_name="$1"
+  local batch_file="$2"
+
+  # Convert batch file → JSON array ["k1","k2",...]
+  keys_json=$(jq -R . < "$batch_file" | jq -s .)
+
+  cypher-shell \
+    -u "$DB_USERNAME" \
+    -p "$DB_PWD" \
+    -d "$db_name" \
+    --fail-at-end \
+    <<EOF
+UNWIND $keys_json AS k
+MATCH (n:usertable {id: k})
+DETACH DELETE n;
+EOF
 }
 
 # Database-specific function to backup database
 backup_database() {
-    local source_url="$1"
-    local target_url="$2"
-    local backup_file="$3"
+    local source_db="$1"
+    local target_db="$2"
+    local backup_dir="$3"
+
+    mkdir -p "$backup_dir"
+
+    log "Stopping Neo4j for backup..." 
+    neo4j stop
     
-    # This is a simplified backup
-    echo "Creating Neo4j backup..."
-    
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$source_url" \
-        "MATCH (n:usertable)
-         RETURN n.id AS id, 
-                n.field0 AS field0, n.field1 AS field1, n.field2 AS field2,
-                n.field3 AS field3, n.field4 AS field4, n.field5 AS field5,
-                n.field6 AS field6, n.field7 AS field7, n.field8 AS field8,
-                n.field9 AS field9;" \
-        2>/dev/null > "$backup_file" || true
+    log "Dumping database '$source_db' to $backup_dir"
+    neo4j-admin database dump "$source_db" \
+    --to-path="$backup_dir"
+
+    log "Loading dump into database '$target_db'"
+    neo4j-admin database load "$target_db" \
+    --from-path="$backup_dir" \
+    --overwrite-destination=true
+
+    log "Starting Neo4j after restore..." 
+    neo4j start
+
+    rm -rf "$backup_dir"
+    log "Backup from '$source_db' to '$target_db' completed at $(date)"
 }
 
-# Database-specific function to truncate (clear all data)
+# Database-specific function to truncate table
 truncate_table() {
-    local db_url="$1"
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$db_url" \
-        "MATCH (n:usertable) DETACH DELETE n;" 2>/dev/null || true
+    local db_name="$1"
+    neo4j-admin database drop "$db_name"
+    neo4j-admin database create "$db_name"
 }
 
 measure_stats() {
-    local db_url="${1:-$DB_URL}"
-    cpu=$(ps -u neo4j -o %cpu= 2>/dev/null | awk '{sum += $1} END {print sum+0}' || echo "0")
-    memory=$(ps -u neo4j -o %mem= 2>/dev/null | awk '{sum += $1} END {print sum+0}' || echo "0")
-    collect_neo4j_metrics "$db_url"
+    local db="${1:-$DB_NAME}"
+    cpu=$(ps -u neo4j -o %cpu= | awk '{sum += $1} END {print sum}')
+    memory=$(ps -u neo4j -o %mem= | awk '{sum += $1} END {print sum}')
+    collect_neo4j_metrics "$db"
 }
 
 run_ycsb_load() {
     local db_url="${1:-$DB_URL}"
-    $YCSB load neo4j -s -P $WORKLOAD_FILE -p url="$db_url" -p username="$DB_USERNAME" -p password="$DB_PWD" > $OUTPUT_CSV 
+    $YCSB load neo4j -s -P $WORKLOAD_FILE \
+        -p url="$db_url" -p username="$DB_USERNAME" -p password="$DB_PWD" > $OUTPUT_CSV 
 }
 
 run_ycsb_run() {
     local db_url="${1:-$DB_URL}"
     local extra_params="${2:-}"
-    $YCSB run neo4j -s -P $WORKLOAD_FILE -p url="$db_url" -p username="$DB_USERNAME" -p password="$DB_PWD" $extra_params > $OUTPUT_CSV
+    $YCSB run neo4j -s -P $WORKLOAD_FILE \
+        -p url="$db_url" -p username="$DB_USERNAME" -p password="$DB_PWD" $extra_params > $OUTPUT_CSV
 }
 
 #----------------------------------------------------------#
@@ -303,19 +277,21 @@ run_ycsb_run() {
 
 YCSB="../bin/ycsb.sh"
 
-# DB names (Neo4j uses a single database, but we can use different labels or instances)
+# DB names (separate Neo4j databases)
 DB_NAME="ycsb"
 BACKUP_DB_NAME="ycsb_backup"
 UNCHANGE_DB_NAME="ycsb_unchange"
 
-# Path to the Neo4j database
-# Neo4j connection URL format: bolt://host:port or neo4j://host:port
-DB_URL="bolt://localhost:7687"
+# Neo4j connection URIs
+BOLT_URI="bolt://localhost:7687"
+NEO4J_URI_BASE="neo4j://localhost:7687"
 DB_USERNAME="neo4j"
 DB_PWD="password"
-BACKUP_URL="bolt://localhost:7687"
-BACKUP_FILE="./ycsb_dump.cypher"
-UNCHANGE_DB_URL="bolt://localhost:7687"
+
+DB_URL="$NEO4J_URI_BASE?database=$DB_NAME"
+BACKUP_URL="$NEO4J_URI_BASE?database=$BACKUP_DB_NAME"
+BACKUP_DIR="./ycsb_neo4j_backup"
+UNCHANGE_DB_URL="$NEO4J_URI_BASE?database=$UNCHANGE_DB_NAME"
 
 # Define the workload file and the log file
 WORKLOAD_FILE="../workloads/workloada-extend"
@@ -351,7 +327,7 @@ readmodifywriteproportion_postextend="0"
 requestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="1000"
+extendoperationcount="10000"
 
 #----------------------------------------------------------#
 
@@ -369,7 +345,6 @@ extract_dynamic_fields() {
     local filtered_output="$1"
     awk '{print $2}' <<< "$filtered_output" \
     | sed 's/,$//' \
-    | grep -v '^Return=ERROR$' \
     | uniq \
     | awk '{ORS=","; print}' \
     | sed 's/,$//'
@@ -382,13 +357,16 @@ write_result() {
     filtered_output=$(awk '/^\[(INSERT|READ|UPDATE|SCAN|EXTEND)\]/' "$INPUT_FILE")
     overall_output=$(awk '/^\[(OVERALL)\]/' "$INPUT_FILE")
 
+    # Extract Return=ERROR lines
+    return_error_output=$(awk '/Return=ERROR/' "$INPUT_FILE" 2>/dev/null || echo "")
+
     if [ "$first" == "TRUE" ]; then   
         # Extract unique second values (except the first one) and create header
-        dynamic_fields_header=$(extract_dynamic_fields "$filtered_output")
-        if [ -n "$dynamic_fields_header" ]; then
-            header="$common_header,$stats_header,$prop_header,$runtime_header,$dynamic_fields_header"
+        dynamic_cols=$(awk '{print $2}' <<< "$filtered_output" | sed 's/,$//' | uniq | awk '{ORS=","; print}' | sed 's/,$//')
+        if [ -n "$dynamic_cols" ]; then
+            header="$common_header,$stats_header,$prop_header,$runtime_header,RETURN=ERROR,$dynamic_cols"
         else
-            header="$common_header,$stats_header,$prop_header,$runtime_header"
+            header="$common_header,$stats_header,$prop_header,$runtime_header,RETURN=ERROR"
         fi
         echo "$header" > "$OUTPUT_FILE"
     fi
@@ -406,7 +384,7 @@ write_result() {
         r=$((10 * (epoch - 1) + run))
     fi
 
-    # Set default values for workload parameters
+    # Set default values for workload parameters if not set
     recordcount=${recordcount:-""}
     readallfields=${readallfields:-""}
     requestdistribution=${requestdistribution:-""}
@@ -423,11 +401,13 @@ write_result() {
         tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
         run_specific+=("$tmp")
     done <<< "$overall_output"
-    
-    # Ensure we have at least 2 elements (Runtime and Throughput)
-    # If overall_output was empty, default to empty strings
-    [ ${#run_specific[@]} -eq 0 ] && run_specific=("" "")
-    [ ${#run_specific[@]} -eq 1 ] && run_specific+=("")
+
+    # Extract Return=ERROR value (third field from Return=ERROR line)
+    return_error_value=""
+    if [ -n "$return_error_output" ]; then
+        return_error_value=$(echo "$return_error_output" | awk '{print $3}' | sed 's/,$//' | head -1)
+    fi
+    return_error_value=${return_error_value:-"0"}
 
     # Iterate through each line
     values_1=""
@@ -467,7 +447,7 @@ write_result() {
             "$extendproportion"
         )
 
-        dynamic_fields=("${run_specific[@]}" "$third_value")
+        dynamic_fields=("${run_specific[@]}" "$return_error_value" "$third_value")
 
         # Append to the values variable
         if [ $k -eq 1 ]; then
@@ -570,7 +550,7 @@ get_key_sizes() {
 }
 
 delete_new_keys() {
-    local db_url="$1"
+    local db_name="$1"
     local keys_before_file="keys.txt"
     local keys_after_file="keys_after_run.txt"
     local keys_to_delete_file="keys_to_delete.txt"
@@ -582,27 +562,38 @@ delete_new_keys() {
     # Find keys that are only in keys_after_run.txt
     comm -13 keys_sorted.txt keys_after_sorted.txt > "$keys_to_delete_file"
 
-    echo "Deleting $(wc -l < "$keys_to_delete_file") new keys from database..."
+    echo "Deleting $(wc -l < "$keys_to_delete_file") new keys from database '$db_name'..."
 
     # Delete those keys
+    BATCH_SIZE=1000
+    if [ ! -s "$keys_to_delete_file" ]; then
+        echo "No new keys to delete."
+    else
+        split -l "$BATCH_SIZE" "$keys_to_delete_file" keys_batch_
+        for f in keys_batch_*; do
+            echo "Deleting batch: $f"
+            delete_batch_neo4j "$db_name" "$f"
+        done
+    fi
+
     if [ -s "$keys_to_delete_file" ]; then
-        delete_keys_from_db "$db_url" "$keys_to_delete_file"
+        rm -f keys_batch_*
     fi
 
     rm -rf "$keys_after_file" "$keys_before_file" keys_sorted.txt keys_after_sorted.txt "$keys_to_delete_file"
-    echo "Deletion complete."
+    echo "✅ Deletion complete."
 }
 
 # Initialize database
 initialize_database() {
-    local db_url="${1:-$DB_URL}"
-    echo "Initializing Neo4j database..."
+    local db_name="$1"
+    echo "Initializing database $db_name..."
 
-    drop_database "$db_url"
-    create_database "$db_url"
-    create_table "$db_url"
+    drop_database "$db_name"
+    create_database "$db_name"
+    create_table "$db_name"
 
-    echo "Done initializing."
+    echo "Done initializing $db_name."
 }
 
 # Function to log and print messages
@@ -614,21 +605,17 @@ log() {
 
 ######Main block of code######
 
-initialize_database "$DB_URL"
-initialize_database "$UNCHANGE_DB_URL"
+# Initialize all three logical databases
+initialize_database "$DB_NAME"
+initialize_database "$UNCHANGE_DB_NAME"
+initialize_database "$BACKUP_DB_NAME"
 
 # Clear the log file and previous backups
 > $LOG_FILE
-rm -rf "$KEY_SIZE_LOG"
+rm -rf $KEY_SIZE_LOG
 # Clear the value size files to start fresh
 > "$KEY_SIZE_FILE_AFTER_EXTEND"
 > "$KEY_SIZE_FILE_AFTER_RUN"
-# Initialize histogram file with a default entry to ensure it exists for first extend phase
-# For the first extend phase, all records start at original field length (100 bytes)
-# Bucket calculation: size / (blockSize * 10) = 100 / (100 * 10) = 0.1 -> bucket 0
-# We need at least one non-zero count, so we initialize with a high count for bucket 0
-# This represents all records starting at the original field length
-echo -e "BlockSize\t100\n0\t1000000" > "$HISTOGRAM_FILE"
 
 # Execute the load phase
 log "=== Executing the load phase ==="
@@ -645,19 +632,20 @@ updateproportion=${updateproportion:-""}
 scanproportion=${scanproportion:-""}
 insertproportion=${insertproportion:-""}
 extendproportion=${extendproportion:-""}
+
 run_ycsb_load "$DB_URL"
-measure_stats "$DB_URL"
+measure_stats "$DB_NAME"
 write_result "TRUE"
 
 # Load unchange value size (reference) DB
 run_ycsb_load "$UNCHANGE_DB_URL"
 
-# Experiment parameters
-for epoch in $(seq 1 1); do
-    for run in $(seq 1 1); do
+# Save original operationcount before modifying it
+original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
-        # Record operation count from workload configuration file
-        opscount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+# Experiment parameters
+for epoch in $(seq 1 3); do
+    for run in $(seq 1 3); do
         
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
@@ -669,9 +657,6 @@ for epoch in $(seq 1 1); do
         perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^operationcount=.*/operationcount=$extendoperationcount/" $WORKLOAD_FILE
-        # Set fieldlengthdistribution=histogram for extend phase (needed when using fieldlengthhistogram parameter)
-        grep -q '^fieldlengthdistribution=' "$WORKLOAD_FILE" || echo -e "\nfieldlengthdistribution=histogram" >> "$WORKLOAD_FILE"
-        perl -i -p -e "s/^fieldlengthdistribution=.*/fieldlengthdistribution=histogram/" "$WORKLOAD_FILE"
         source "$WORKLOAD_FILE"
         # Extract workload parameters after sourcing
         recordcount=${recordcount:-""}
@@ -684,18 +669,22 @@ for epoch in $(seq 1 1); do
         extendproportion=${extendproportion:-""}
 
         # Execute the run phase
-        log "=== Executing the run phase with extendproportion=1 and other proportions=0 ==="
+        log "=== Executing the run phase with extendproportion=0.2 and other proportions=0 ==="
         phase="extend"
         run_ycsb_run "$DB_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
-        measure_stats "$DB_URL"
+        measure_stats "$DB_NAME"
         write_result "FALSE"
 
         # Key Sizes
         echo "Size computation started"
-        get_key_sizes_from_db "$DB_URL" "$KEY_SIZE_LOG"
+        echo "ycsb_key,size" > "$KEY_SIZE_LOG"
+        get_key_sizes_from_db "$DB_NAME" "$KEY_SIZE_LOG"
         get_key_sizes "$KEY_SIZE_LOG" "$HISTOGRAM_FILE"
 
-        iteration=$((10*($epoch-1)+$run))
+        # Sanitize epoch and run for iteration calculation
+        epoch_iter=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+        run_iter=$(echo "$run" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+        iteration=$((10 * (epoch_iter - 1) + run_iter))
 
         if [[ "$iteration" -eq 1 ]]; then
             # First iteration: (re)create file with header and initial data
@@ -714,7 +703,7 @@ for epoch in $(seq 1 1); do
         perl -i -p -e "s/^insertproportion=.*/insertproportion=$insertproportion_postextend/" $WORKLOAD_FILE
         perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_postextend/" $WORKLOAD_FILE
         perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_postextend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^operationcount=.*/operationcount=$opscount/" $WORKLOAD_FILE
+        perl -i -p -e "s/^operationcount=.*/operationcount=$original_operationcount/" $WORKLOAD_FILE
         grep -q '^fieldlengthdistribution=' "$WORKLOAD_FILE" || echo -e "\nfieldlengthdistribution=histogram" >> "$WORKLOAD_FILE"
         source "$WORKLOAD_FILE"
         # Extract workload parameters after sourcing
@@ -728,40 +717,42 @@ for epoch in $(seq 1 1); do
         extendproportion=${extendproportion:-""}
 
         # Save the existing keys in the database
-        get_keys_from_db "$DB_URL" "keys.txt"
+        get_keys_from_db "$DB_NAME" "keys.txt"
 
         # Execute the run phase
-        log "=== Executing the run phase with extendproportion=0 and readproportion=1 ==="
+        log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
         phase="run"
         run_ycsb_run "$DB_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
-        measure_stats "$DB_URL"
+        measure_stats "$DB_NAME"
         write_result "FALSE"
 
         # Delete new keys that were inserted during the run
-        get_keys_from_db "$DB_URL" "keys_after_run.txt"
-        delete_new_keys "$DB_URL"
+        get_keys_from_db "$DB_NAME" "keys_after_run.txt"
+        delete_new_keys "$DB_NAME"
 
         # Workload with unchanging value sizes
-        get_keys_from_db "$UNCHANGE_DB_URL" "keys.txt"
+        get_keys_from_db "$UNCHANGE_DB_NAME" "keys.txt"
         phase="reference"
         run_ycsb_run "$UNCHANGE_DB_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
-        measure_stats "$UNCHANGE_DB_URL"
+        measure_stats "$UNCHANGE_DB_NAME"
         write_result "FALSE"
 
         # Delete new keys from unchange database
-        get_keys_from_db "$UNCHANGE_DB_URL" "keys_after_run.txt"
-        delete_new_keys "$UNCHANGE_DB_URL"
+        get_keys_from_db "$UNCHANGE_DB_NAME" "keys_after_run.txt"
+        delete_new_keys "$UNCHANGE_DB_NAME"
     
-        if (( $((10*($epoch-1)+$run)) % 1 == 0 )); then
+        # Sanitize epoch and run for condition check
+        epoch_check=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+        run_check=$(echo "$run" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+        if (( $((10 * (epoch_check - 1) + run_check)) % 1 == 0 )); then
             phase="clean-run"
             
             echo "Backing up the database started"
-            backup_database "$DB_URL" "$BACKUP_URL" "$BACKUP_FILE"
+            backup_database "$DB_NAME" "$BACKUP_DB_NAME" "$BACKUP_DIR"
             echo "Backing up the database finished"
 
             run_ycsb_run "$BACKUP_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
-            measure_stats "$BACKUP_URL"
-            rm -rf "$BACKUP_FILE"
+            measure_stats "$BACKUP_DB_NAME"
             write_result "FALSE"
 
             # Revert and remove fieldlengthdistribution variable from workload file
@@ -769,9 +760,14 @@ for epoch in $(seq 1 1); do
 
             # Key Sizes
             echo "Size computation started"
-            get_key_sizes_from_db "$BACKUP_URL" "$KEY_SIZE_LOG"
+            echo "ycsb_key,size" > "$KEY_SIZE_LOG"
+            get_key_sizes_from_db "$BACKUP_DB_NAME" "$KEY_SIZE_LOG"
             
-            iteration=$((10*($epoch-1)+$run))
+            # Sanitize epoch and run for iteration calculation
+            epoch_iter2=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+            run_iter2=$(echo "$run" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
+            iteration=$((10 * (epoch_iter2 - 1) + run_iter2))
+
             if [[ "$iteration" -eq 1 ]]; then
                 # First iteration: (re)create file with header and initial data
                 echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_RUN"
@@ -783,9 +779,16 @@ for epoch in $(seq 1 1); do
             # Extract the recordcount from the workload file
             recordcount=$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
-            # Get total size and calculate average field length
-            total_size=$(get_total_size_from_db "$BACKUP_URL")
-            fieldlengthaverage=$(echo "$total_size / (10 * $recordcount)" | bc)
+            # PostgreSQL query to get the total size of all records
+            total_size=$(get_total_size_from_db "$BACKUP_DB_NAME")
+
+            # Set average field length (with error handling)
+            if [ -z "$total_size" ] || [ -z "$recordcount" ] || [ "$recordcount" -eq 0 ]; then
+                echo "Warning: Cannot calculate fieldlengthaverage - total_size=$total_size, recordcount=$recordcount"
+                fieldlengthaverage="$fieldlengthoriginal"
+            else
+                fieldlengthaverage=$(echo "$total_size / (10 * $recordcount)" | bc)
+            fi
 
             echo "$total_size" "$fieldlengthaverage"
 
@@ -793,7 +796,7 @@ for epoch in $(seq 1 1); do
             perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthaverage/" $WORKLOAD_FILE
             source "$WORKLOAD_FILE"
 
-            truncate_table "$BACKUP_URL"
+            truncate_table "$BACKUP_DB_NAME"
 
             # Resetting the database with new data load
             log "=== Executing the load phase for the comparison study ==="
@@ -807,7 +810,7 @@ for epoch in $(seq 1 1); do
             log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
             phase="avg-run"
             run_ycsb_run "$BACKUP_URL"
-            measure_stats "$BACKUP_URL"
+            measure_stats "$BACKUP_DB_NAME"
             write_result "FALSE"
         fi
     done
