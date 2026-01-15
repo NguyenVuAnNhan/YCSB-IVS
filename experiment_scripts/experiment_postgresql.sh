@@ -267,7 +267,7 @@ delete_new_keys() {
   local table="${4:-usertable}" 
   local key_column="${5:-YCSB_KEY}"
 
-  local file_before="keys.txt"
+  local file_before="keys_before_run.txt"
   local file_after="keys_after_run.txt"
   local file_to_delete="keys_to_delete.txt"
 
@@ -486,7 +486,7 @@ for epoch in $(seq 1 2); do
         # Save the existing keys in the database
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
         -c "SELECT ycsb_key
-            FROM usertable;" | tail -n +2 > keys.txt
+            FROM usertable;" > keys_before_run.txt
 
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
@@ -500,25 +500,36 @@ for epoch in $(seq 1 2); do
         # Save keys to remove duplicates later
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
         -c "SELECT ycsb_key
-            FROM usertable;" | tail -n +2 > keys_after_run.txt
+            FROM usertable;" > keys_after_run.txt
 
         # Sort both files
-        sort keys.txt > keys_sorted.txt
+        sort keys_before_run.txt > keys_before_sorted.txt
         sort keys_after_run.txt > keys_after_sorted.txt
 
         # Get keys that are in keys_after_run.txt but not in keys.txt
-        comm -13 keys_sorted.txt keys_after_sorted.txt > keys_to_delete.txt
+        comm -13 keys_before_sorted.txt keys_after_sorted.txt > keys_to_delete.txt
 
         # Delete keys from PostgreSQL
-        while read key; do
-          echo "DELETE FROM usertable WHERE ycsb_key='$key';"
-        done < keys_to_delete.txt | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME"
+        KEYS_TO_DELETE_FILE="$(pwd)/keys_to_delete.txt"
+        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" << EOF
+BEGIN;
 
-        rm -rf keys_after_run.txt keys.txt keys_after_sorted.txt keys_to_delete.txt
+CREATE TEMP TABLE temp_keys_to_delete (ycsb_key TEXT) ON COMMIT DROP;
+
+\copy temp_keys_to_delete(ycsb_key) FROM '$KEYS_TO_DELETE_FILE';
+
+DELETE FROM usertable u
+USING temp_keys_to_delete k
+WHERE u.ycsb_key = k.ycsb_key;
+
+COMMIT;
+EOF
+
+        rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
 
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" -At -F"," \
         -c "SELECT ycsb_key
-            FROM usertable;" | tail -n +2 > keys.txt
+            FROM usertable;" > keys_before_run.txt
 
         # Reference workload with unchanging value sizes
         phase="reference"
@@ -531,21 +542,32 @@ for epoch in $(seq 1 2); do
         # Save keys to remove duplicates later
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" -At -F"," \
         -c "SELECT ycsb_key
-            FROM usertable;" | tail -n +2 > keys_after_run.txt
+            FROM usertable;" > keys_after_run.txt
 
         # Sort both files
-        sort keys.txt > keys_sorted.txt
+        sort keys_before_run.txt > keys_before_sorted.txt
         sort keys_after_run.txt > keys_after_sorted.txt
 
         # Get keys that are in keys_after_run.txt but not in keys.txt
-        comm -13 keys_sorted.txt keys_after_sorted.txt > keys_to_delete.txt
+        comm -13 keys_before_sorted.txt keys_after_sorted.txt > keys_to_delete.txt
 
         # Delete keys from PostgreSQL
-        while read key; do
-          echo "DELETE FROM usertable WHERE ycsb_key='$key';"
-        done < keys_to_delete.txt | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME"
+        KEYS_TO_DELETE_FILE="$(pwd)/keys_to_delete.txt"
+        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" << EOF
+BEGIN;
 
-        rm -rf keys_after_run.txt keys.txt keys_after_sorted.txt keys_to_delete.txt
+CREATE TEMP TABLE temp_keys_to_delete (ycsb_key TEXT) ON COMMIT DROP;
+
+\copy temp_keys_to_delete(ycsb_key) FROM '$KEYS_TO_DELETE_FILE';
+
+DELETE FROM usertable u
+USING temp_keys_to_delete k
+WHERE u.ycsb_key = k.ycsb_key;
+
+COMMIT;
+EOF
+
+        rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
     
         if (( $((10*($epoch-1)+$run)) % 1 == 0 )); then
             phase="clean-run"
