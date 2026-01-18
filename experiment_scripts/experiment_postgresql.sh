@@ -260,39 +260,6 @@ get_key_sizes() {
     log "Histogram written to $histogram_file (BlockSize = 100)"
 }
 
-delete_new_keys() {
-  local db_name="$1"          
-  local user="${2:-postgres}"       
-  local password="${3:-postgres}"       
-  local table="${4:-usertable}" 
-  local key_column="${5:-YCSB_KEY}"
-
-  local file_before="keys_before_run.txt"
-  local file_after="keys_after_run.txt"
-  local file_to_delete="keys_to_delete.txt"
-
-  if [[ -z "$db_name" ]]; then
-    echo "Usage: delete_new_keys <db_name> [user] [password] [table] [key_column]"
-    return 1
-  fi
-
-  # Sort the key files
-  sort "$file_before" > keys_sorted.txt
-  sort "$file_after" > keys_after_sorted.txt
-
-  # Find keys that are only in keys_after_run.txt
-  comm -13 keys_sorted.txt keys_after_sorted.txt > "$file_to_delete"
-
-  log "Deleting $(wc -l < "$file_to_delete") new keys from '$table' in database '$db_name'..."
-
-  # Run DELETE statements
-  while read -r key; do
-    echo "DELETE FROM $table WHERE $key_column='$key';"
-  done < "$file_to_delete" | PGPASSWORD="$password" psql -U "$user" -d "$db_name"
-
-  log "New key deletion complete."
-}
-
 # Function to extract PostgreSQL database and background writer statistics
 collect_postgres_metrics() {
     local db="${1:-$DB_NAME}"
@@ -511,19 +478,9 @@ for epoch in $(seq 1 10); do
 
         # Delete keys from PostgreSQL
         KEYS_TO_DELETE_FILE="$(pwd)/keys_to_delete.txt"
-        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -q -X << EOF
-BEGIN;
-
-CREATE TEMP TABLE temp_keys_to_delete (ycsb_key TEXT) ON COMMIT DROP;
-
-\copy temp_keys_to_delete(ycsb_key) FROM '$KEYS_TO_DELETE_FILE';
-
-DELETE FROM usertable u
-USING temp_keys_to_delete k
-WHERE u.ycsb_key = k.ycsb_key;
-
-COMMIT;
-EOF
+        while read key; do
+            echo "DELETE FROM usertable WHERE ycsb_key='$key';"
+        done < "$KEYS_TO_DELETE_FILE" | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME"
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
 
@@ -553,19 +510,9 @@ EOF
 
         # Delete keys from PostgreSQL
         KEYS_TO_DELETE_FILE="$(pwd)/keys_to_delete.txt"
-        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" -q -X << EOF
-BEGIN;
-
-CREATE TEMP TABLE temp_keys_to_delete (ycsb_key TEXT) ON COMMIT DROP;
-
-\copy temp_keys_to_delete(ycsb_key) FROM '$KEYS_TO_DELETE_FILE';
-
-DELETE FROM usertable u
-USING temp_keys_to_delete k
-WHERE u.ycsb_key = k.ycsb_key;
-
-COMMIT;
-EOF
+        while read key; do
+            echo "DELETE FROM usertable WHERE ycsb_key='$key';"
+        done < "$KEYS_TO_DELETE_FILE" | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME"
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
     
