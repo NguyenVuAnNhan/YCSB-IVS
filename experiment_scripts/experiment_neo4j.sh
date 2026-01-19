@@ -2,32 +2,59 @@
 
 ###### Neo4j-specific helpers and database functions ######
 
+assert_bolt_uri() {
+    if [[ -z "$1" || "$1" != bolt://* ]]; then
+        echo "ERROR: invalid or empty Bolt URI: '$1'" >&2
+        return 1
+    fi
+}
+
+assert_neo4j_uri() {
+    if [[ -z "$1" || "$1" != neo4j://* ]]; then
+        echo "ERROR: invalid or empty Neo4j URI: '$1'" >&2
+        return 1
+    fi
+}
+
 # Run a Cypher statement against a specific Neo4j database
 run_cypher() {
-    local db_name="$1"
+    local bolt_uri="$1"
     local query="$2"
     shift 2 || true
-    cypher-shell -u "$DB_USERNAME" -p "$DB_PWD" -a "$BOLT_URI" -d "$db_name" "$query" "$@"
+
+    assert_bolt_uri "$bolt_uri" || return 1
+
+    cypher-shell \
+        -u "$DB_USERNAME" \
+        -p "$DB_PWD" \
+        -a "$bolt_uri" \
+        "$query" "$@"
 }
 
-# Drop a Neo4j database (multi-DB, via system database)
-drop_database() {
-    local db_name="${1:-$DB_NAME}"
-    run_cypher "system" "DROP DATABASE $db_name IF EXISTS;" >/dev/null 2>&1 || true
+# Reset a neo4j database (similar to dropping)
+reset_instance() {
+    local instance_name="$1"     # e.g. main / backup / unchange
+    local data_dir="$2"          # e.g. data-main
+    local neo4j_home="$3"        # e.g. /opt/neo4j-instance-main
+
+    echo "Resetting Neo4j instance: $instance_name"
+
+    "$neo4j_home/bin/neo4j" stop || true
+    rm -rf "$neo4j_home/$data_dir"/*
+    "$neo4j_home/bin/neo4j" start
+
+    # wait for bolt to come back
+    sleep 5
 }
 
-# Create a Neo4j database (multi-DB, via system database)
-create_database() {
-    local db_name="${1:-$DB_NAME}"
-    run_cypher "system" "CREATE DATABASE $db_name IF NOT EXISTS;" >/dev/null 2>&1 || true
-}
-
-# Create the main YCSB table/constraint in a given database
+# Create the main YCSB label + constraint on a given instance
 create_table() {
-    local db_name="${1:-$DB_NAME}"
-    # Unique constraint on id for :usertable
-    run_cypher "$db_name" \
-        "CREATE CONSTRAINT usertable_id IF NOT EXISTS FOR (n:usertable) REQUIRE n.id IS UNIQUE;" \
+    local bolt_uri="$1"
+
+    run_cypher "$bolt_uri" \
+        "CREATE CONSTRAINT usertable_id IF NOT EXISTS
+         FOR (n:usertable)
+         REQUIRE n.id IS UNIQUE;" \
         >/dev/null 2>&1 || true
 }
 
@@ -66,7 +93,7 @@ close_db() {
 # Function to extract Neo4j database statistics
 # For simplicity and robustness, if any metric query fails, we default to 0.
 collect_neo4j_metrics() {
-    local db_name="${1:-$DB_NAME}"
+    local bolt_uri="${1:-$MAIN_BOLT_URI}"
 
     # Defaults
     page_cache_hits="0"
@@ -93,9 +120,10 @@ collect_neo4j_metrics() {
     transaction_terminated="0"
 
     # Page cache metrics
-    page_cache_metrics=$(run_cypher "$db_name" \
+    page_cache_metrics=$(run_cypher "$bolt_uri" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Page cache') YIELD attributes
-         RETURN attributes['hits'].value AS hits, attributes['faults'].value AS faults;" \
+         RETURN attributes['hits'].value AS hits,
+                attributes['faults'].value AS faults;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
     if [ -n "$page_cache_metrics" ]; then
         page_cache_hits=$(echo "$page_cache_metrics" | cut -d'|' -f1)
@@ -103,7 +131,7 @@ collect_neo4j_metrics() {
     fi
 
     # Transaction metrics
-    tx_metrics=$(run_cypher "$db_name" \
+    tx_metrics=$(run_cypher "$bolt_uri" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Transactions') YIELD attributes
          RETURN attributes['NumberOfCommittedTransactions'].value AS commits,
                 attributes['NumberOfRolledBackTransactions'].value AS rollbacks,
@@ -116,13 +144,13 @@ collect_neo4j_metrics() {
     fi
 
     # Current transaction count
-    tx_active=$(run_cypher "$db_name" \
+    tx_active=$(run_cypher "$bolt_uri" \
         "SHOW TRANSACTIONS YIELD transactionId RETURN count(*) AS count;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
     transaction_active="${tx_active:-0}"
 
     # Primitive counts
-    db_ops=$(run_cypher "$db_name" \
+    db_ops=$(run_cypher "$bolt_uri" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Primitive count') YIELD attributes
          RETURN attributes['NumberOfNodeIdsInUse'].value AS nodes,
                 attributes['NumberOfRelationshipIdsInUse'].value AS relationships,
@@ -135,7 +163,7 @@ collect_neo4j_metrics() {
     fi
 
     # Checkpoint metrics
-    checkpoint_metrics=$(run_cypher "$db_name" \
+    checkpoint_metrics=$(run_cypher "$bolt_uri" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Check pointing') YIELD attributes
          RETURN attributes['CheckPointTotalTime'].value AS total_time,
                 attributes['NumberOfCheckPointEvents'].value AS events;" \
@@ -146,7 +174,7 @@ collect_neo4j_metrics() {
     fi
 
     # Log rotation metrics
-    log_metrics=$(run_cypher "$db_name" \
+    log_metrics=$(run_cypher "$bolt_uri" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Log rotation') YIELD attributes
          RETURN attributes['LogRotationEvents'].value AS events,
                 attributes['LogRotationTotalTime'].value AS total_time;" \
@@ -157,7 +185,7 @@ collect_neo4j_metrics() {
     fi
 
     # Store log file size (approximation for appended bytes)
-    log_appended_bytes=$(run_cypher "$db_name" \
+    log_appended_bytes=$(run_cypher "$bolt_uri" \
         "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Store file sizes') YIELD attributes
          RETURN attributes['LogFileSize'].value AS size;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
@@ -166,10 +194,10 @@ collect_neo4j_metrics() {
 
 # Database-specific function to get key sizes (appends to file, caller should create header)
 get_key_sizes_from_db() {
-    local db_name="$1"
+    local bolt_uri="$1"
     local key_size_log="$2"
 
-    run_cypher "$db_name" \
+    run_cypher "$bolt_uri" \
         "MATCH (n:usertable)
          RETURN n.id AS ycsb_key,
                 reduce(total = 0, k IN ['field0','field1','field2','field3','field4','field5','field6','field7','field8','field9'] |
@@ -180,8 +208,9 @@ get_key_sizes_from_db() {
 
 # Database-specific function to get total size
 get_total_size_from_db() {
-    local db_name="$1"
-    run_cypher "$db_name" \
+    local bolt_uri="$1"
+
+    run_cypher "$bolt_uri" \
         "MATCH (n:usertable)
          RETURN sum(reduce(total = 0, k IN ['field0','field1','field2','field3','field4','field5','field6','field7','field8','field9'] |
             total + CASE WHEN n[k] IS NOT NULL THEN size(toString(n[k])) ELSE 0 END)) AS total;" \
@@ -190,27 +219,29 @@ get_total_size_from_db() {
 
 # Database-specific function to get keys from database
 get_keys_from_db() {
-    local db_name="$1"
+    local bolt_uri="$1"
     local output_file="$2"
-    run_cypher "$db_name" \
+
+    run_cypher "$bolt_uri" \
         "MATCH (n:usertable) RETURN n.id AS ycsb_key;" \
         2>/dev/null | tail -n +2 | sed 's/|//' > "$output_file"
 }
 
 # Database-specific function to delete keys
 delete_batch_neo4j() {
-  local db_name="$1"
-  local batch_file="$2"
+    local bolt_uri="$1"
+    local batch_file="$2"
 
-  # Convert batch file → JSON array ["k1","k2",...]
-  keys_json=$(jq -R . < "$batch_file" | jq -s .)
+    # Convert batch file → JSON array ["k1","k2",...]
+    local keys_json
+    keys_json=$(jq -R . < "$batch_file" | jq -s .)
 
-  cypher-shell \
-    -u "$DB_USERNAME" \
-    -p "$DB_PWD" \
-    -d "$db_name" \
-    --fail-at-end \
-    <<EOF
+    cypher-shell \
+        -u "$DB_USERNAME" \
+        -p "$DB_PWD" \
+        -a "$bolt_uri" \
+        --fail-at-end \
+        <<EOF
 UNWIND $keys_json AS k
 MATCH (n:usertable {id: k})
 DETACH DELETE n;
@@ -218,57 +249,71 @@ EOF
 }
 
 # Database-specific function to backup database
-backup_database() {
-    local source_db="$1"
-    local target_db="$2"
-    local backup_dir="$3"
+backup_instance() {
+    local source_home="$1"     # e.g. /opt/neo4j-instance-main
+    local source_data="$2"     # e.g. data-main
+    local target_home="$3"     # e.g. /opt/neo4j-instance-backup
+    local target_data="$4"     # e.g. data-backup
 
-    mkdir -p "$backup_dir"
+    log "Stopping Neo4j source + target for backup..."
+    "$source_home/bin/neo4j" stop || true
+    "$target_home/bin/neo4j" stop || true
 
-    log "Stopping Neo4j for backup..." 
-    neo4j stop
-    
-    log "Dumping database '$source_db' to $backup_dir"
-    neo4j-admin database dump "$source_db" \
-    --to-path="$backup_dir"
+    log "Copying data dir snapshot..."
+    rm -rf "$target_home/$target_data"/*
+    rsync -a --delete "$source_home/$source_data"/ "$target_home/$target_data"/
+    sync
 
-    log "Loading dump into database '$target_db'"
-    neo4j-admin database load "$target_db" \
-    --from-path="$backup_dir" \
-    --overwrite-destination=true
-
-    log "Starting Neo4j after restore..." 
-    neo4j start
-
-    rm -rf "$backup_dir"
-    log "Backup from '$source_db' to '$target_db' completed at $(date)"
-}
-
-# Database-specific function to truncate table
-truncate_table() {
-    local db_name="$1"
-    neo4j-admin database drop "$db_name"
-    neo4j-admin database create "$db_name"
+    log "Starting Neo4j source + target..."
+    "$source_home/bin/neo4j" start
+    "$target_home/bin/neo4j" start
 }
 
 measure_stats() {
-    local db="${1:-$DB_NAME}"
-    cpu=$(ps -u neo4j -o %cpu= | awk '{sum += $1} END {print sum}')
-    memory=$(ps -u neo4j -o %mem= | awk '{sum += $1} END {print sum}')
-    collect_neo4j_metrics "$db"
+    local bolt_uri="${1:-$MAIN_BOLT_URI}"
+    local pid
+
+    assert_bolt_uri "$bolt_uri" || return 1
+
+    pid=$(lsof -iTCP -sTCP:LISTEN -P \
+        | awk -v port="${bolt_uri##*:}" '$0 ~ port {print $2; exit}')
+
+    if [[ -z "$pid" ]]; then
+        echo "WARN: Could not resolve PID for $bolt_uri" >&2
+        cpu=0
+        memory=0
+    else
+        cpu=$(ps -p "$pid" -o %cpu= | tr -d ' ')
+        memory=$(ps -p "$pid" -o %mem= | tr -d ' ')
+    fi
+
+    collect_neo4j_metrics "$bolt_uri"
 }
 
 run_ycsb_load() {
-    local db_url="${1:-$DB_URL}"
-    $YCSB load neo4j -s -P $WORKLOAD_FILE \
-        -p url="$db_url" -p username="$DB_USERNAME" -p password="$DB_PWD" > $OUTPUT_CSV 
+    local neo4j_uri="${1:-$MAIN_NEO4J_URI}"
+
+    assert_neo4j_uri "$neo4j_uri" || return 1
+
+    $YCSB load neo4j -s -P "$WORKLOAD_FILE" \
+        -p url="$neo4j_uri" \
+        -p username="$DB_USERNAME" \
+        -p password="$DB_PWD" \
+        > "$OUTPUT_CSV"
 }
 
 run_ycsb_run() {
-    local db_url="${1:-$DB_URL}"
+    local neo4j_uri="${1:-$MAIN_NEO4J_URI}"
     local extra_params="${2:-}"
-    $YCSB run neo4j -s -P $WORKLOAD_FILE \
-        -p url="$db_url" -p username="$DB_USERNAME" -p password="$DB_PWD" $extra_params > $OUTPUT_CSV
+
+    assert_neo4j_uri "$neo4j_uri" || return 1
+
+    $YCSB run neo4j -s -P "$WORKLOAD_FILE" \
+        -p url="$neo4j_uri" \
+        -p username="$DB_USERNAME" \
+        -p password="$DB_PWD" \
+        $extra_params \
+        > "$OUTPUT_CSV"
 }
 
 #----------------------------------------------------------#
@@ -277,21 +322,34 @@ run_ycsb_run() {
 
 YCSB="../bin/ycsb.sh"
 
-# DB names (separate Neo4j databases)
-DB_NAME="ycsb"
-BACKUP_DB_NAME="ycsb_backup"
-UNCHANGE_DB_NAME="ycsb_unchange"
+# Logical roles (each = separate Neo4j instance)
+MAIN_NAME="ycsb"
+BACKUP_NAME="ycsb-backup"
+UNCHANGE_NAME="ycsb-unchange"
 
-# Neo4j connection URIs
-BOLT_URI="bolt://localhost:7687"
-NEO4J_URI_BASE="neo4j://localhost:7687"
+# Ports per instance
+MAIN_BOLT_PORT=7687
+BACKUP_BOLT_PORT=7787
+UNCHANGE_BOLT_PORT=7887
+
+# HTTP ports (optional, for browser/debug)
+MAIN_HTTP_PORT=7474
+BACKUP_HTTP_PORT=7574
+UNCHANGE_HTTP_PORT=7674
+
+# Credentials
 DB_USERNAME="neo4j"
 DB_PWD="password"
 
-DB_URL="$NEO4J_URI_BASE?database=$DB_NAME"
-BACKUP_URL="$NEO4J_URI_BASE?database=$BACKUP_DB_NAME"
-BACKUP_DIR="./ycsb_neo4j_backup"
-UNCHANGE_DB_URL="$NEO4J_URI_BASE?database=$UNCHANGE_DB_NAME"
+# Bolt URIs
+MAIN_BOLT_URI="bolt://localhost:${MAIN_BOLT_PORT}"
+BACKUP_BOLT_URI="bolt://localhost:${BACKUP_BOLT_PORT}"
+UNCHANGE_BOLT_URI="bolt://localhost:${UNCHANGE_BOLT_PORT}"
+
+# Neo4j URIs (for drivers that require neo4j://)
+MAIN_NEO4J_URI="neo4j://localhost:${MAIN_BOLT_PORT}"
+BACKUP_NEO4J_URI="neo4j://localhost:${BACKUP_BOLT_PORT}"
+UNCHANGE_NEO4J_URI="neo4j://localhost:${UNCHANGE_BOLT_PORT}"
 
 # Define the workload file and the log file
 WORKLOAD_FILE="../workloads/workloada-extend"
@@ -315,7 +373,7 @@ updateproportion_extend="0"
 scanproportion_extend="0"
 insertproportion_extend="0"
 readmodifywriteproportion_extend="0"
-requestdistribution_extend="zipfian"
+requestdistribution_extend="uniform"
 
 # After extend phase experiment parameters
 extendproportion_postextend="0"
@@ -327,7 +385,7 @@ readmodifywriteproportion_postextend="0"
 requestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="10000"
+extendoperationcount="5000"
 
 #----------------------------------------------------------#
 
@@ -550,7 +608,13 @@ get_key_sizes() {
 }
 
 delete_new_keys() {
-    local db_name="$1"
+    local bolt_uri="$1"
+
+    if [[ -z "$bolt_uri" ]]; then
+        echo "ERROR: delete_new_keys requires a Bolt URI" >&2
+        return 1
+    fi
+
     local keys_before_file="keys.txt"
     local keys_after_file="keys_after_run.txt"
     local keys_to_delete_file="keys_to_delete.txt"
@@ -562,17 +626,21 @@ delete_new_keys() {
     # Find keys that are only in keys_after_run.txt
     comm -13 keys_sorted.txt keys_after_sorted.txt > "$keys_to_delete_file"
 
-    echo "Deleting $(wc -l < "$keys_to_delete_file") new keys from database '$db_name'..."
+    local delete_count
+    delete_count=$(wc -l < "$keys_to_delete_file" | tr -d ' ')
+
+    echo "Deleting $delete_count new keys from Neo4j instance at '$bolt_uri'..."
 
     # Delete those keys
-    BATCH_SIZE=1000
+    local BATCH_SIZE=1000
+
     if [ ! -s "$keys_to_delete_file" ]; then
         echo "No new keys to delete."
     else
         split -l "$BATCH_SIZE" "$keys_to_delete_file" keys_batch_
         for f in keys_batch_*; do
             echo "Deleting batch: $f"
-            delete_batch_neo4j "$db_name" "$f"
+            delete_batch_neo4j "$bolt_uri" "$f"
         done
     fi
 
@@ -580,20 +648,72 @@ delete_new_keys() {
         rm -f keys_batch_*
     fi
 
-    rm -rf "$keys_after_file" "$keys_before_file" keys_sorted.txt keys_after_sorted.txt "$keys_to_delete_file"
-    echo "✅ Deletion complete."
+    rm -rf \
+        "$keys_after_file" \
+        "$keys_before_file" \
+        keys_sorted.txt \
+        keys_after_sorted.txt \
+        "$keys_to_delete_file"
+
+    echo "✅ Deletion complete for instance $bolt_uri."
 }
 
 # Initialize database
 initialize_database() {
     local db_name="$1"
-    echo "Initializing database $db_name..."
 
-    drop_database "$db_name"
-    create_database "$db_name"
-    create_table "$db_name"
+    local bolt_uri
+    local data_dir
+    local neo4j_home
 
-    echo "Done initializing $db_name."
+    case "$db_name" in
+        ycsb)
+            bolt_uri="$MAIN_BOLT_URI"
+            data_dir="data-main"
+            neo4j_home="/opt/neo4j-instance-main"
+            ;;
+        ycsb-backup)
+            bolt_uri="$BACKUP_BOLT_URI"
+            data_dir="data-backup"
+            neo4j_home="/opt/neo4j-instance-backup"
+            ;;
+        ycsb-unchange)
+            bolt_uri="$UNCHANGE_BOLT_URI"
+            data_dir="data-unchange"
+            neo4j_home="/opt/neo4j-instance-unchange"
+            ;;
+        *)
+            echo "ERROR: Unknown DB role: $db_name" >&2
+            return 1
+            ;;
+    esac
+
+    initialize_database_instance "$bolt_uri" "$db_name" "$data_dir" "$neo4j_home"
+}
+
+initialize_database_instance() {
+    local bolt_uri="$1"
+    local instance_name="$2"
+    local data_dir="$3"
+    local neo4j_home="$4"
+
+    echo "Initializing Neo4j instance '$instance_name' at $bolt_uri..."
+
+    "$neo4j_home/bin/neo4j" stop || true
+    rm -rf "$neo4j_home/$data_dir"/*
+    "$neo4j_home/bin/neo4j" start
+
+    echo "Waiting for Neo4j ($instance_name) to become ready..."
+    for i in {1..30}; do
+        if run_cypher "$bolt_uri" "RETURN 1;" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+
+    create_table "$bolt_uri"
+
+    echo "✅ Done initializing $instance_name."
 }
 
 # Function to log and print messages
@@ -605,10 +725,10 @@ log() {
 
 ######Main block of code######
 
-# Initialize all three logical databases
-initialize_database "$DB_NAME"
-initialize_database "$UNCHANGE_DB_NAME"
-initialize_database "$BACKUP_DB_NAME"
+# Initialize all three PHYSICAL databases
+initialize_database "$MAIN_NAME"
+initialize_database "$UNCHANGE_NAME"
+initialize_database "$BACKUP_NAME"
 
 # Clear the log file and previous backups
 > $LOG_FILE
@@ -633,12 +753,12 @@ scanproportion=${scanproportion:-""}
 insertproportion=${insertproportion:-""}
 extendproportion=${extendproportion:-""}
 
-run_ycsb_load "$DB_URL"
-measure_stats "$DB_NAME"
+run_ycsb_load "$MAIN_NEO4J_URI"
+measure_stats "$MAIN_BOLT_URI"
 write_result "TRUE"
 
 # Load unchange value size (reference) DB
-run_ycsb_load "$UNCHANGE_DB_URL"
+run_ycsb_load "$UNCHANGE_NEO4J_URI"
 
 # Save original operationcount before modifying it
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
@@ -671,14 +791,14 @@ for epoch in $(seq 1 3); do
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0.2 and other proportions=0 ==="
         phase="extend"
-        run_ycsb_run "$DB_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
-        measure_stats "$DB_NAME"
+        run_ycsb_run "$MAIN_NEO4J_URI" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
+        measure_stats "$MAIN_BOLT_URI"
         write_result "FALSE"
 
         # Key Sizes
         echo "Size computation started"
         echo "ycsb_key,size" > "$KEY_SIZE_LOG"
-        get_key_sizes_from_db "$DB_NAME" "$KEY_SIZE_LOG"
+        get_key_sizes_from_db "$MAIN_BOLT_URI" "$KEY_SIZE_LOG"
         get_key_sizes "$KEY_SIZE_LOG" "$HISTOGRAM_FILE"
 
         # Sanitize epoch and run for iteration calculation
@@ -717,29 +837,29 @@ for epoch in $(seq 1 3); do
         extendproportion=${extendproportion:-""}
 
         # Save the existing keys in the database
-        get_keys_from_db "$DB_NAME" "keys.txt"
+        get_keys_from_db "$MAIN_BOLT_URI" "keys.txt"
 
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
         phase="run"
-        run_ycsb_run "$DB_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
-        measure_stats "$DB_NAME"
+        run_ycsb_run "$MAIN_NEO4J_URI" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
+        measure_stats "$MAIN_BOLT_URI"
         write_result "FALSE"
 
         # Delete new keys that were inserted during the run
-        get_keys_from_db "$DB_NAME" "keys_after_run.txt"
-        delete_new_keys "$DB_NAME"
+        get_keys_from_db "$MAIN_BOLT_URI" "keys_after_run.txt"
+        delete_new_keys "$MAIN_BOLT_URI"
 
         # Workload with unchanging value sizes
-        get_keys_from_db "$UNCHANGE_DB_NAME" "keys.txt"
+        get_keys_from_db "$UNCHANGE_BOLT_URI" "keys.txt"
         phase="reference"
-        run_ycsb_run "$UNCHANGE_DB_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
-        measure_stats "$UNCHANGE_DB_NAME"
+        run_ycsb_run "$UNCHANGE_NEO4J_URI" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
+        measure_stats "$UNCHANGE_BOLT_URI"
         write_result "FALSE"
 
         # Delete new keys from unchange database
-        get_keys_from_db "$UNCHANGE_DB_NAME" "keys_after_run.txt"
-        delete_new_keys "$UNCHANGE_DB_NAME"
+        get_keys_from_db "$UNCHANGE_BOLT_URI" "keys_after_run.txt"
+        delete_new_keys "$UNCHANGE_BOLT_URI"
     
         # Sanitize epoch and run for condition check
         epoch_check=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
@@ -748,11 +868,23 @@ for epoch in $(seq 1 3); do
             phase="clean-run"
             
             echo "Backing up the database started"
-            backup_database "$DB_NAME" "$BACKUP_DB_NAME" "$BACKUP_DIR"
+
+            backup_instance \
+            "/opt/neo4j-instance-main" "data-main" \
+            "/opt/neo4j-instance-backup" "data-backup"
+
+            echo "Waiting for backup Neo4j to become ready..."
+            for i in {1..30}; do
+                if run_cypher "$BACKUP_BOLT_URI" "RETURN 1;" >/dev/null 2>&1; then
+                    break
+                fi
+                sleep 1
+            done
+
             echo "Backing up the database finished"
 
-            run_ycsb_run "$BACKUP_URL" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
-            measure_stats "$BACKUP_DB_NAME"
+            run_ycsb_run "$BACKUP_NEO4J_URI" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
+            measure_stats "$BACKUP_BOLT_URI"
             write_result "FALSE"
 
             # Revert and remove fieldlengthdistribution variable from workload file
@@ -761,7 +893,7 @@ for epoch in $(seq 1 3); do
             # Key Sizes
             echo "Size computation started"
             echo "ycsb_key,size" > "$KEY_SIZE_LOG"
-            get_key_sizes_from_db "$BACKUP_DB_NAME" "$KEY_SIZE_LOG"
+            get_key_sizes_from_db "$BACKUP_BOLT_URI" "$KEY_SIZE_LOG"
             
             # Sanitize epoch and run for iteration calculation
             epoch_iter2=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
@@ -780,7 +912,7 @@ for epoch in $(seq 1 3); do
             recordcount=$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
             # PostgreSQL query to get the total size of all records
-            total_size=$(get_total_size_from_db "$BACKUP_DB_NAME")
+            total_size=$(get_total_size_from_db "$BACKUP_BOLT_URI")
 
             # Set average field length (with error handling)
             if [ -z "$total_size" ] || [ -z "$recordcount" ] || [ "$recordcount" -eq 0 ]; then
@@ -796,11 +928,10 @@ for epoch in $(seq 1 3); do
             perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthaverage/" $WORKLOAD_FILE
             source "$WORKLOAD_FILE"
 
-            truncate_table "$BACKUP_DB_NAME"
-
+            initialize_database "$BACKUP_NAME"
             # Resetting the database with new data load
             log "=== Executing the load phase for the comparison study ==="
-            run_ycsb_load "$BACKUP_URL"
+            run_ycsb_load "$BACKUP_NEO4J_URI"
             
             # Change the value size back for comparison
             perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthoriginal/" $WORKLOAD_FILE
@@ -809,8 +940,8 @@ for epoch in $(seq 1 3); do
             # Execute the run phase
             log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
             phase="avg-run"
-            run_ycsb_run "$BACKUP_URL"
-            measure_stats "$BACKUP_DB_NAME"
+            run_ycsb_run "$BACKUP_NEO4J_URI"
+            measure_stats "$BACKUP_BOLT_URI"
             write_result "FALSE"
         fi
     done
