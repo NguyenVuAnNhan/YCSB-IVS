@@ -31,22 +31,6 @@ run_cypher() {
         "$query" "$@"
 }
 
-# Reset a neo4j database (similar to dropping)
-reset_instance() {
-    local instance_name="$1"     # e.g. main / backup / unchange
-    local data_dir="$2"          # e.g. data-main
-    local neo4j_home="$3"        # e.g. /opt/neo4j-instance-main
-
-    echo "Resetting Neo4j instance: $instance_name"
-
-    "$neo4j_home/bin/neo4j" stop || true
-    rm -rf "$neo4j_home/$data_dir"/*
-    "$neo4j_home/bin/neo4j" start
-
-    # wait for bolt to come back
-    sleep 5
-}
-
 # Create the main YCSB label + constraint on a given instance
 create_table() {
     local bolt_uri="$1"
@@ -255,18 +239,24 @@ backup_instance() {
     local target_home="$3"     # e.g. /opt/neo4j-instance-backup
     local target_data="$4"     # e.g. data-backup
 
+    run_cypher "$MAIN_BOLT_URI" "CALL db.checkpoint();"
+    sleep 2
+
     log "Stopping Neo4j source + target for backup..."
-    "$source_home/bin/neo4j" stop || true
-    "$target_home/bin/neo4j" stop || true
+    sudo -u neo4j "$source_home/bin/neo4j" stop || true
+    sudo -u neo4j "$target_home/bin/neo4j" stop || true
 
     log "Copying data dir snapshot..."
     rm -rf "$target_home/$target_data"/*
     rsync -a --delete "$source_home/$source_data"/ "$target_home/$target_data"/
     sync
 
+    log "Seeding password on backup instance..."
+    sudo -u neo4j "$target_home/bin/neo4j-admin" dbms set-initial-password "$DB_PWD"
+
     log "Starting Neo4j source + target..."
-    "$source_home/bin/neo4j" start
-    "$target_home/bin/neo4j" start
+    sudo -u neo4j "$source_home/bin/neo4j" start
+    sudo -u neo4j "$target_home/bin/neo4j" start
 }
 
 measure_stats() {
@@ -699,9 +689,13 @@ initialize_database_instance() {
 
     echo "Initializing Neo4j instance '$instance_name' at $bolt_uri..."
 
-    "$neo4j_home/bin/neo4j" stop || true
+    sudo -u neo4j "$neo4j_home/bin/neo4j" stop || true
     rm -rf "$neo4j_home/$data_dir"/*
-    "$neo4j_home/bin/neo4j" start
+
+    # Seed auth
+    sudo -u neo4j "$neo4j_home/bin/neo4j-admin" dbms set-initial-password "$DB_PWD"
+
+    sudo -u neo4j "$neo4j_home/bin/neo4j" start
 
     echo "Waiting for Neo4j ($instance_name) to become ready..."
     for i in {1..30}; do
