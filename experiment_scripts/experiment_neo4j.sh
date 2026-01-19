@@ -245,7 +245,7 @@ backup_instance() {
 
     log "Copying data dir snapshot..."
     sudo -u neo4j rm -rf "$target_home/$target_data"/*
-    sudo -u neo4j rsync -a --delete \
+    sudo -u neo4j rsync -a --delete --no-times \
     "$source_home/$source_data"/ \
     "$target_home/$target_data"/
     sync
