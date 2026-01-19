@@ -79,7 +79,7 @@ close_db() {
 collect_neo4j_metrics() {
     local bolt_uri="${1:-$MAIN_BOLT_URI}"
 
-    # Defaults
+    # ---- defaults ----
     page_cache_hits="0"
     page_cache_faults="0"
     transaction_commits="0"
@@ -103,77 +103,96 @@ collect_neo4j_metrics() {
     transaction_started="0"
     transaction_terminated="0"
 
-    # Page cache metrics
-    page_cache_metrics=$(run_cypher "$bolt_uri" \
-        "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Page cache') YIELD attributes
-         RETURN attributes['hits'].value AS hits,
-                attributes['faults'].value AS faults;" \
+    # ---- PAGE CACHE (Neo4j 5.x) ----
+    page_cache_raw=$(run_cypher "$bolt_uri" \
+        "CALL db.stats.retrieve('PAGE CACHE')
+         YIELD section, data
+         UNWIND data AS row
+         RETURN row.hits AS hits, row.faults AS faults;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    if [ -n "$page_cache_metrics" ]; then
-        page_cache_hits=$(echo "$page_cache_metrics" | cut -d'|' -f1)
-        page_cache_faults=$(echo "$page_cache_metrics" | cut -d'|' -f2)
+
+    if [[ -n "$page_cache_raw" && "$page_cache_raw" != "NULL|NULL" ]]; then
+        page_cache_hits=$(cut -d'|' -f1 <<<"$page_cache_raw")
+        page_cache_faults=$(cut -d'|' -f2 <<<"$page_cache_raw")
+    else
+        log "[METRIC-ERR] Page cache stats unavailable on $bolt_uri"
     fi
 
-    # Transaction metrics
-    tx_metrics=$(run_cypher "$bolt_uri" \
-        "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Transactions') YIELD attributes
-         RETURN attributes['NumberOfCommittedTransactions'].value AS commits,
-                attributes['NumberOfRolledBackTransactions'].value AS rollbacks,
-                attributes['PeakNumberOfConcurrentTransactions'].value AS peak_concurrent;" \
-        2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    if [ -n "$tx_metrics" ]; then
-        transaction_commits=$(echo "$tx_metrics" | cut -d'|' -f1)
-        transaction_rollbacks=$(echo "$tx_metrics" | cut -d'|' -f2)
-        transaction_peak_concurrent=$(echo "$tx_metrics" | cut -d'|' -f3)
-    fi
 
-    # Current transaction count
-    tx_active=$(run_cypher "$bolt_uri" \
+    # ---- TRANSACTION COUNTS ----
+    tx_active_raw=$(run_cypher "$bolt_uri" \
         "SHOW TRANSACTIONS YIELD transactionId RETURN count(*) AS count;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    transaction_active="${tx_active:-0}"
 
-    # Primitive counts
-    db_ops=$(run_cypher "$bolt_uri" \
-        "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Primitive count') YIELD attributes
-         RETURN attributes['NumberOfNodeIdsInUse'].value AS nodes,
-                attributes['NumberOfRelationshipIdsInUse'].value AS relationships,
-                attributes['NumberOfPropertyIdsInUse'].value AS properties;" \
-        2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    if [ -n "$db_ops" ]; then
-        nodes_created=$(echo "$db_ops" | cut -d'|' -f1)
-        relationships_created=$(echo "$db_ops" | cut -d'|' -f2)
-        properties_set=$(echo "$db_ops" | cut -d'|' -f3)
+    if [[ -n "$tx_active_raw" ]]; then
+        transaction_active="$tx_active_raw"
+    else
+        log "[METRIC-ERR] SHOW TRANSACTIONS failed on $bolt_uri"
     fi
 
-    # Checkpoint metrics
-    checkpoint_metrics=$(run_cypher "$bolt_uri" \
-        "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Check pointing') YIELD attributes
-         RETURN attributes['CheckPointTotalTime'].value AS total_time,
-                attributes['NumberOfCheckPointEvents'].value AS events;" \
+
+    # ---- GRAPH COUNTS (nodes, rels, props) ----
+    graph_counts_raw=$(run_cypher "$bolt_uri" \
+        "CALL db.stats.retrieve('GRAPH COUNTS')
+         YIELD section, data
+         UNWIND data AS row
+         RETURN
+           row.nodes AS nodes,
+           row.relationships AS relationships,
+           row.properties AS properties;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    if [ -n "$checkpoint_metrics" ]; then
-        checkpoint_total_time=$(echo "$checkpoint_metrics" | cut -d'|' -f1)
-        checkpoint_total_events=$(echo "$checkpoint_metrics" | cut -d'|' -f2)
+
+    if [[ -n "$graph_counts_raw" && "$graph_counts_raw" != "NULL|NULL|NULL" ]]; then
+        nodes_created=$(cut -d'|' -f1 <<<"$graph_counts_raw")
+        relationships_created=$(cut -d'|' -f2 <<<"$graph_counts_raw")
+        properties_set=$(cut -d'|' -f3 <<<"$graph_counts_raw")
+    else
+        log "[METRIC-ERR] Graph counts unavailable on $bolt_uri"
     fi
 
-    # Log rotation metrics
-    log_metrics=$(run_cypher "$bolt_uri" \
-        "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Log rotation') YIELD attributes
-         RETURN attributes['LogRotationEvents'].value AS events,
-                attributes['LogRotationTotalTime'].value AS total_time;" \
+
+    # ---- STORE SIZES (WAL approximation) ----
+    store_sizes_raw=$(run_cypher "$bolt_uri" \
+        "CALL db.stats.retrieve('STORE SIZES')
+         YIELD section, data
+         UNWIND data AS row
+         RETURN row.logSizeBytes AS logSize;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    if [ -n "$log_metrics" ]; then
-        log_rotation_events=$(echo "$log_metrics" | cut -d'|' -f1)
-        log_rotation_total_time=$(echo "$log_metrics" | cut -d'|' -f2)
+
+    if [[ -n "$store_sizes_raw" && "$store_sizes_raw" != "NULL" ]]; then
+        log_appended_bytes="$store_sizes_raw"
+    else
+        log "[METRIC-ERR] Store size stats unavailable on $bolt_uri"
     fi
 
-    # Store log file size (approximation for appended bytes)
-    log_appended_bytes=$(run_cypher "$bolt_uri" \
-        "CALL dbms.queryJmx('org.neo4j:instance=kernel#0,name=Store file sizes') YIELD attributes
-         RETURN attributes['LogFileSize'].value AS size;" \
+
+    # ---- INDEX STATS (best-effort) ----
+    index_stats_raw=$(run_cypher "$bolt_uri" \
+        "SHOW INDEXES YIELD readCount, trackedSince
+         RETURN sum(readCount) AS reads;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-    log_appended_bytes="${log_appended_bytes:-0}"
+
+    if [[ -n "$index_stats_raw" && "$index_stats_raw" != "NULL" ]]; then
+        index_hits="$index_stats_raw"
+    else
+        log "[METRIC-ERR] Index stats unavailable on $bolt_uri"
+    fi
+
+
+    # ---- COMMIT / ROLLBACK COUNTS (approx via logs) ----
+    tx_counts_raw=$(run_cypher "$bolt_uri" \
+        "SHOW TRANSACTIONS YIELD status
+         RETURN
+           sum(CASE WHEN status = 'Committed' THEN 1 ELSE 0 END) AS commits,
+           sum(CASE WHEN status = 'RolledBack' THEN 1 ELSE 0 END) AS rollbacks;" \
+        2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
+
+    if [[ -n "$tx_counts_raw" && "$tx_counts_raw" != "NULL|NULL" ]]; then
+        transaction_commits=$(cut -d'|' -f1 <<<"$tx_counts_raw")
+        transaction_rollbacks=$(cut -d'|' -f2 <<<"$tx_counts_raw")
+    else
+        log "[METRIC-ERR] Transaction commit/rollback stats unavailable on $bolt_uri"
+    fi
 }
 
 # Database-specific function to get key sizes (appends to file, caller should create header)
@@ -910,13 +929,21 @@ for epoch in $(seq 1 3); do
 
             # Set average field length (with error handling)
             if [ -z "$total_size" ] || [ -z "$recordcount" ] || [ "$recordcount" -eq 0 ]; then
-                echo "Warning: Cannot calculate fieldlengthaverage - total_size=$total_size, recordcount=$recordcount"
+                log "[FIELDLEN]   Cannot calculate average field length"
+                log "[FIELDLEN]   total_size=$total_size"
+                log "[FIELDLEN]   recordcount=$recordcount"
+                log "[FIELDLEN]   fallback=fieldlengthoriginal=$fieldlengthoriginal"
+
                 fieldlengthaverage="$fieldlengthoriginal"
             else
                 fieldlengthaverage=$(echo "$total_size / (10 * $recordcount)" | bc)
-            fi
 
-            echo "$total_size" "$fieldlengthaverage"
+                log "[FIELDLEN] Computed average field length"
+                log "[FIELDLEN]   total_size_bytes=$total_size"
+                log "[FIELDLEN]   recordcount=$recordcount"
+                log "[FIELDLEN]   fields_per_record=10"
+                log "[FIELDLEN]   fieldlengthaverage=$fieldlengthaverage"
+            fi
 
             # Change the value size for comparison
             perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthaverage/" $WORKLOAD_FILE
