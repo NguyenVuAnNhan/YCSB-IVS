@@ -244,9 +244,12 @@ backup_instance() {
     sudo -u neo4j "$target_home/bin/neo4j" stop || true
 
     log "Copying data dir snapshot..."
-    rm -rf "$target_home/$target_data"/*
-    rsync -a --delete "$source_home/$source_data"/ "$target_home/$target_data"/
+    sudo -u neo4j rm -rf "$target_home/$target_data"/*
+    sudo -u neo4j rsync -a --delete \
+    "$source_home/$source_data"/ \
+    "$target_home/$target_data"/
     sync
+
 
     log "Seeding password on backup instance..."
     sudo -u neo4j "$target_home/bin/neo4j-admin" dbms set-initial-password "$DB_PWD"
@@ -687,7 +690,7 @@ initialize_database_instance() {
     echo "Initializing Neo4j instance '$instance_name' at $bolt_uri..."
 
     sudo -u neo4j "$neo4j_home/bin/neo4j" stop || true
-    rm -rf "$neo4j_home/$data_dir"/*
+    sudo -u neo4j rm -rf "$neo4j_home/$data_dir"/*
 
     # Seed auth
     sudo -u neo4j "$neo4j_home/bin/neo4j-admin" dbms set-initial-password "$DB_PWD"
