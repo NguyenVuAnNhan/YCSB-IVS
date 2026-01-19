@@ -239,9 +239,6 @@ backup_instance() {
     local target_home="$3"     # e.g. /opt/neo4j-instance-backup
     local target_data="$4"     # e.g. data-backup
 
-    run_cypher "$MAIN_BOLT_URI" "CALL db.checkpoint();"
-    sleep 2
-
     log "Stopping Neo4j source + target for backup..."
     sudo -u neo4j "$source_home/bin/neo4j" stop || true
     sudo -u neo4j "$target_home/bin/neo4j" stop || true
