@@ -497,9 +497,6 @@ write_result() {
         return_error_value=$(sanitize_csv_field "$raw_ret")
     fi
 
-    # ------------------------------------------------------------------
-    # 🔒 SNAPSHOT Neo4j metrics ONCE, before parsing any YCSB lines
-    # ------------------------------------------------------------------
     neo_snapshot=()
     for field_name in "${binding_field_names[@]}"; do
         raw_val="${!field_name}"
