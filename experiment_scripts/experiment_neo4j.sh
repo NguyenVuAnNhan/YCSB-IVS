@@ -45,28 +45,28 @@ create_table() {
 # Define database-specific binding field names (metrics collected from Neo4j)
 # These should match the variable names set by collect_neo4j_metrics() function
 binding_field_names=(
-    "page_cache_hits"
-    "page_cache_faults"
-    "transaction_commits"
-    "transaction_rollbacks"
-    "nodes_created"
-    "nodes_deleted"
-    "relationships_created"
-    "relationships_deleted"
-    "properties_set"
-    "index_hits"
-    "index_misses"
-    "lock_acquisition_time"
-    "lock_wait_time"
-    "checkpoint_total_time"
-    "checkpoint_total_events"
-    "log_rotation_events"
-    "log_appended_bytes"
-    "log_rotation_total_time"
-    "transaction_started"
-    "transaction_peak_concurrent"
-    "transaction_active"
-    "transaction_terminated"
+    "neo_page_cache_hits"
+    "neo_page_cache_faults"
+    "neo_transaction_commits"
+    "neo_transaction_rollbacks"
+    "neo_nodes_created"
+    "neo_nodes_deleted"
+    "neo_relationships_created"
+    "neo_relationships_deleted"
+    "neo_properties_set"
+    "neo_index_hits"
+    "neo_index_misses"
+    "neo_lock_acquisition_time"
+    "neo_lock_wait_time"
+    "neo_checkpoint_total_time"
+    "neo_checkpoint_total_events"
+    "neo_log_rotation_events"
+    "neo_log_appended_bytes"
+    "neo_log_rotation_total_time"
+    "neo_transaction_started"
+    "neo_transaction_peak_concurrent"
+    "neo_transaction_active"
+    "neo_transaction_terminated"
 )
 
 # Function to close the database
@@ -80,28 +80,28 @@ collect_neo4j_metrics() {
     local bolt_uri="${1:-$MAIN_BOLT_URI}"
 
     # ---- defaults ----
-    page_cache_hits="0"
-    page_cache_faults="0"
-    transaction_commits="0"
-    transaction_rollbacks="0"
-    transaction_peak_concurrent="0"
-    transaction_active="0"
-    nodes_created="0"
-    nodes_deleted="0"
-    relationships_created="0"
-    relationships_deleted="0"
-    properties_set="0"
-    index_hits="0"
-    index_misses="0"
-    lock_acquisition_time="0"
-    lock_wait_time="0"
-    checkpoint_total_time="0"
-    checkpoint_total_events="0"
-    log_rotation_events="0"
-    log_rotation_total_time="0"
-    log_appended_bytes="0"
-    transaction_started="0"
-    transaction_terminated="0"
+    neo_page_cache_hits="0"
+    neo_page_cache_faults="0"
+    neo_transaction_commits="0"
+    neo_transaction_rollbacks="0"
+    neo_nodes_created="0"
+    neo_nodes_deleted="0"
+    neo_relationships_created="0"
+    neo_relationships_deleted="0"
+    neo_properties_set="0"
+    neo_index_hits="0"
+    neo_index_misses="0"
+    neo_lock_acquisition_time="0"
+    neo_lock_wait_time="0"
+    neo_checkpoint_total_time="0"
+    neo_checkpoint_total_events="0"
+    neo_log_rotation_events="0"
+    neo_log_rotation_total_time="0"
+    neo_log_appended_bytes="0"
+    neo_transaction_started="0"
+    neo_transaction_peak_concurrent="0"
+    neo_transaction_active="0"
+    neo_transaction_terminated="0"
 
     # ---- PAGE CACHE (Neo4j 5.x) ----
     page_cache_raw=$(run_cypher "$bolt_uri" \
@@ -112,8 +112,8 @@ collect_neo4j_metrics() {
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
 
     if [[ -n "$page_cache_raw" && "$page_cache_raw" != "NULL|NULL" ]]; then
-        page_cache_hits=$(cut -d'|' -f1 <<<"$page_cache_raw")
-        page_cache_faults=$(cut -d'|' -f2 <<<"$page_cache_raw")
+        neo_page_cache_hits=$(cut -d'|' -f1 <<<"$page_cache_raw")
+        neo_page_cache_faults=$(cut -d'|' -f2 <<<"$page_cache_raw")
     else
         log "[METRIC-ERR] Page cache stats unavailable on $bolt_uri"
     fi
@@ -125,7 +125,7 @@ collect_neo4j_metrics() {
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
 
     if [[ -n "$tx_active_raw" ]]; then
-        transaction_active="$tx_active_raw"
+        neo_transaction_active="$tx_active_raw"
     else
         log "[METRIC-ERR] SHOW TRANSACTIONS failed on $bolt_uri"
     fi
@@ -143,9 +143,9 @@ collect_neo4j_metrics() {
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
 
     if [[ -n "$graph_counts_raw" && "$graph_counts_raw" != "NULL|NULL|NULL" ]]; then
-        nodes_created=$(cut -d'|' -f1 <<<"$graph_counts_raw")
-        relationships_created=$(cut -d'|' -f2 <<<"$graph_counts_raw")
-        properties_set=$(cut -d'|' -f3 <<<"$graph_counts_raw")
+        neo_nodes_created=$(cut -d'|' -f1 <<<"$graph_counts_raw")
+        neo_relationships_created=$(cut -d'|' -f2 <<<"$graph_counts_raw")
+        neo_properties_set=$(cut -d'|' -f3 <<<"$graph_counts_raw")
     else
         log "[METRIC-ERR] Graph counts unavailable on $bolt_uri"
     fi
@@ -160,7 +160,7 @@ collect_neo4j_metrics() {
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
 
     if [[ -n "$store_sizes_raw" && "$store_sizes_raw" != "NULL" ]]; then
-        log_appended_bytes="$store_sizes_raw"
+        neo_log_appended_bytes="$store_sizes_raw"
     else
         log "[METRIC-ERR] Store size stats unavailable on $bolt_uri"
     fi
@@ -173,7 +173,7 @@ collect_neo4j_metrics() {
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
 
     if [[ -n "$index_stats_raw" && "$index_stats_raw" != "NULL" ]]; then
-        index_hits="$index_stats_raw"
+        neo_index_hits="$index_stats_raw"
     else
         log "[METRIC-ERR] Index stats unavailable on $bolt_uri"
     fi
@@ -188,8 +188,8 @@ collect_neo4j_metrics() {
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
 
     if [[ -n "$tx_counts_raw" && "$tx_counts_raw" != "NULL|NULL" ]]; then
-        transaction_commits=$(cut -d'|' -f1 <<<"$tx_counts_raw")
-        transaction_rollbacks=$(cut -d'|' -f2 <<<"$tx_counts_raw")
+        neo_transaction_commits=$(cut -d'|' -f1 <<<"$tx_counts_raw")
+        neo_transaction_rollbacks=$(cut -d'|' -f2 <<<"$tx_counts_raw")
     else
         log "[METRIC-ERR] Transaction commit/rollback stats unavailable on $bolt_uri"
     fi
@@ -367,12 +367,12 @@ OUTPUT_CSV="../analysis/neo4j_output.csv"
 
 # Define input and output filenames
 INPUT_FILE="../analysis/neo4j_output.csv"
-OUTPUT_FILE="../analysis/Data/Workload_data/neo4j_run1_uniform_light.csv"
+OUTPUT_FILE="../analysis/Data/Workload_data/neo4j_run1_uniform_light_mixed.csv"
 
 # Key size gathering
 KEY_SIZE_LOG="key_sizes.csv"
-KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_neo4j_run1_uniform_light_before.csv"
-KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_neo4j_run1_uniform_light_after.csv"
+KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_neo4j_run1_uniform_light_before_mixed.csv"
+KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_neo4j_run1_uniform_light_after_mixed.csv"
 HISTOGRAM_FILE="histogram.txt"
 
 # Extend phase experiment parameters
@@ -386,8 +386,8 @@ requestdistribution_extend="uniform"
 
 # After extend phase experiment parameters
 extendproportion_postextend="0"
-readproportion_postextend="1"
-updateproportion_postextend="0"
+readproportion_postextend="0.5"
+updateproportion_postextend="0.5"
 scanproportion_postextend="0"
 insertproportion_postextend="0"
 readmodifywriteproportion_postextend="0"
@@ -417,9 +417,23 @@ extract_dynamic_fields() {
     | sed 's/,$//'
 }
 
-# Function to write results as a csv 
+sanitize_csv_field() {
+    local f="$1"
+    # replace tabs, newlines, CR
+    f="$(printf "%s" "$f" | sed 's/[\t\r\n]/ /g')"
+    # escape quotes
+    f="${f//\"/\"\"}"
+    # quote if non-numeric
+    if [[ "$f" =~ [^0-9\.\-] ]]; then
+        f="\"$f\""
+    fi
+    echo "$f"
+}
+
+# Function to write results as a csv
 write_result() {
     local first="$1"
+
     # Remove rows not starting with specific operations and filter specific operations
     filtered_output=$(awk '/^\[(INSERT|READ|UPDATE|SCAN|EXTEND)\]/' "$INPUT_FILE")
     overall_output=$(awk '/^\[(OVERALL)\]/' "$INPUT_FILE")
@@ -427,31 +441,38 @@ write_result() {
     # Extract Return=ERROR lines
     return_error_output=$(awk '/Return=ERROR/' "$INPUT_FILE" 2>/dev/null || echo "")
 
+    # ---- Build header (first iteration only) ----
     if [ "$first" == "TRUE" ]; then   
-        # Extract unique second values (except the first one) and create header
-        dynamic_cols=$(awk '{print $2}' <<< "$filtered_output" | sed 's/,$//' | uniq | awk '{ORS=","; print}' | sed 's/,$//')
+        # Deterministic dynamic header (no uniq bug)
+        dynamic_cols=$(awk '{print $2}' <<< "$filtered_output" \
+            | sed 's/,$//' \
+            | sort -u \
+            | awk '{ORS=","; print}' \
+            | sed 's/,$//')
+
         if [ -n "$dynamic_cols" ]; then
             header="$common_header,$stats_header,$prop_header,$runtime_header,RETURN=ERROR,$dynamic_cols"
         else
             header="$common_header,$stats_header,$prop_header,$runtime_header,RETURN=ERROR"
         fi
+
         echo "$header" > "$OUTPUT_FILE"
     fi
 
-    # Set default values for epoch and run if not set (e.g., during load phase)
+    # ---- Epoch / run handling ----
     epoch=${epoch:-0}
     run=${run:-0}
-    # Sanitize epoch and run to ensure they're single integers (take first line only, remove whitespace)
+
     epoch=$(echo "$epoch" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
     run=$(echo "$run" | head -1 | tr -d '\n\r ' | grep -o '^[0-9]*' || echo "0")
-    # Handle load phase: use 0 instead of negative value
+
     if [ "$phase" == "load" ]; then
         r=0
     else
         r=$((10 * (epoch - 1) + run))
     fi
 
-    # Set default values for workload parameters if not set
+    # ---- Default workload params ----
     recordcount=${recordcount:-""}
     readallfields=${readallfields:-""}
     requestdistribution=${requestdistribution:-""}
@@ -461,35 +482,46 @@ write_result() {
     insertproportion=${insertproportion:-""}
     extendproportion=${extendproportion:-""}
 
-    # Extract runtime and throughput from overall output
+    # ---- Extract OVERALL stats (runtime, throughput, etc.) ----
     run_specific=()
     while IFS= read -r inner_line; do
-        # Extract third value (the metric value)
-        tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
+        raw_tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
+        tmp=$(sanitize_csv_field "$raw_tmp")
         run_specific+=("$tmp")
     done <<< "$overall_output"
 
-    # Extract Return=ERROR value (third field from Return=ERROR line)
-    return_error_value=""
+    # ---- Extract Return=ERROR ----
+    return_error_value="0"
     if [ -n "$return_error_output" ]; then
-        return_error_value=$(echo "$return_error_output" | awk '{print $3}' | sed 's/,$//' | head -1)
+        raw_ret=$(echo "$return_error_output" | awk '{print $3}' | sed 's/,$//' | head -1)
+        return_error_value=$(sanitize_csv_field "$raw_ret")
     fi
-    return_error_value=${return_error_value:-"0"}
 
-    # Iterate through each line
+    # ------------------------------------------------------------------
+    # 🔒 SNAPSHOT Neo4j metrics ONCE, before parsing any YCSB lines
+    # ------------------------------------------------------------------
+    neo_snapshot=()
+    for field_name in "${binding_field_names[@]}"; do
+        raw_val="${!field_name}"
+        [[ -z "$raw_val" ]] && raw_val="0"
+        neo_snapshot+=("$raw_val")
+    done
+
+    # ---- Iterate through YCSB per-op lines ----
     values_1=""
     values_2=""
     k=1
     p=1
     prev_operation=""
-    # Initialize operation to empty in case filtered_output is empty
     operation=""
-    while IFS= read -r line; do
-        # Extract operation and third value
-        operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
-        third_value=$(echo "$line" | awk '{print $3}' | sed 's/,$//')
 
-        # Populate field arrays dynamically
+    while IFS= read -r line; do
+        # Extract operation and per-op value
+        operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
+        raw_third_value=$(echo "$line" | awk '{print $3}' | sed 's/,$//')
+        third_value=$(sanitize_csv_field "$raw_third_value")
+
+        # ---- Common fields ----
         common_fields=(
             "$r"
             "$phase"
@@ -499,13 +531,17 @@ write_result() {
             "$operation"
         )
 
-        # Populate binding_fields from database-specific metrics using binding_field_names
+        # ---- Binding fields (from frozen snapshot, not live namespace) ----
         binding_fields=()
+        i=0
         for field_name in "${binding_field_names[@]}"; do
-            # Use indirect variable reference to get the value
-            binding_fields+=("${!field_name}")
+            raw_val="${neo_snapshot[$i]}"
+            [[ -z "$raw_val" ]] && raw_val="0"
+            binding_fields+=("$(sanitize_csv_field "$raw_val")")
+            i=$((i + 1))
         done
 
+        # ---- Proportion fields ----
         prop_fields=(
             "$readproportion"
             "$updateproportion"
@@ -514,9 +550,10 @@ write_result() {
             "$extendproportion"
         )
 
+        # ---- Dynamic fields: OVERALL + RETURN=ERROR + per-op ----
         dynamic_fields=("${run_specific[@]}" "$return_error_value" "$third_value")
 
-        # Append to the values variable
+        # ---- Assemble rows ----
         if [ $k -eq 1 ]; then
             row_fields=(
                 "${common_fields[@]}"
@@ -525,13 +562,14 @@ write_result() {
                 "${dynamic_fields[@]}"
             )
 
-            # join with commas (use subshell to avoid affecting global IFS)
             values_1=$(IFS=','; echo "${row_fields[*]}")
 
             k=$((k + 1))
             prev_operation="$operation"
+
         elif [ $p -eq 1 ] && [ "$prev_operation" == "$operation" ]; then
             values_1="$values_1,$third_value"
+
         elif [ $p -eq 1 ] && [ "$prev_operation" != "$operation" ]; then
             row_fields=(
                 "${common_fields[@]}"
@@ -540,23 +578,22 @@ write_result() {
                 "${dynamic_fields[@]}"
             )
 
-            # join with commas (use subshell to avoid affecting global IFS)
             values_2=$(IFS=','; echo "${row_fields[*]}")
 
             p=$((p + 1))
             prev_operation="$operation"
+
         else
             values_2="$values_2,$third_value"
         fi
+
     done <<< "$filtered_output"
 
-    # Print the values to the output file (only if not empty)
+    # ---- Write rows ----
     [ -n "$values_1" ] && echo "$values_1" >> "$OUTPUT_FILE"
     [ -n "$values_2" ] && echo "$values_2" >> "$OUTPUT_FILE"
 
-    # Print completion message
     echo "Arrangement completed. Output saved to $OUTPUT_FILE"
-
 }
 
 # Function to append values for the first iteration
@@ -777,8 +814,8 @@ run_ycsb_load "$UNCHANGE_NEO4J_URI"
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
 # Experiment parameters
-for epoch in $(seq 1 3); do
-    for run in $(seq 1 3); do
+for epoch in $(seq 1 1); do
+    for run in $(seq 1 1); do
         
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
