@@ -1,0 +1,8 @@
+=== Executing the load phase ===
+=== Setting parameter values for extend phase ===
+=== Executing the run phase with extendproportion=1 and other proportions=0 ===
+=== Setting parameter values for run phase ===
+=== Executing the run phase with extendproportion=0 and readproportion=1 ===
+=== Executing the load phase for the comparison study ===
+=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ===
+=== All steps completed. Results are logged in ./ycsb_neo4j_results.log ===
