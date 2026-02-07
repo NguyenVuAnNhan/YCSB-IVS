@@ -45,8 +45,6 @@ create_table() {
 # Define database-specific binding field names (metrics collected from Neo4j)
 # These should match the variable names set by collect_neo4j_metrics() function
 binding_field_names=(
-    "page_cache_hits"
-    "page_cache_faults"
     "transaction_commits"
     "transaction_rollbacks"
     "nodes_created"
@@ -61,7 +59,6 @@ binding_field_names=(
     "checkpoint_total_time"
     "checkpoint_total_events"
     "log_rotation_events"
-    "log_appended_bytes"
     "log_rotation_total_time"
     "transaction_started"
     "transaction_peak_concurrent"
@@ -80,8 +77,6 @@ collect_neo4j_metrics() {
     local bolt_uri="${1:-$MAIN_BOLT_URI}"
 
     # ---- defaults ----
-    page_cache_hits="0"
-    page_cache_faults="0"
     transaction_commits="0"
     transaction_rollbacks="0"
     transaction_peak_concurrent="0"
@@ -99,24 +94,8 @@ collect_neo4j_metrics() {
     checkpoint_total_events="0"
     log_rotation_events="0"
     log_rotation_total_time="0"
-    log_appended_bytes="0"
     transaction_started="0"
     transaction_terminated="0"
-
-    # ---- PAGE CACHE (Neo4j 5.x) ----
-    page_cache_raw=$(run_cypher "$bolt_uri" \
-        "CALL db.stats.retrieve('PAGE CACHE')
-         YIELD section, data
-         UNWIND data AS row
-         RETURN row.hits AS hits, row.faults AS faults;" \
-        2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-
-    if [[ -n "$page_cache_raw" && "$page_cache_raw" != "NULL|NULL" ]]; then
-        page_cache_hits=$(cut -d'|' -f1 <<<"$page_cache_raw")
-        page_cache_faults=$(cut -d'|' -f2 <<<"$page_cache_raw")
-    else
-        log "[METRIC-ERR] Page cache stats unavailable on $bolt_uri"
-    fi
 
 
     # ---- TRANSACTION COUNTS ----
@@ -137,9 +116,9 @@ collect_neo4j_metrics() {
          YIELD section, data
          UNWIND data AS row
          RETURN
-           row.nodes AS nodes,
-           row.relationships AS relationships,
-           row.properties AS properties;" \
+           reduce(total = 0, x IN row.nodes | total + x.count) AS nodes,
+           reduce(total = 0, x IN row.relationships | total + x.count) AS relationships,
+           reduce(total = 0, x IN row.properties | total + x.count) AS properties;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
 
     if [[ -n "$graph_counts_raw" && "$graph_counts_raw" != "NULL|NULL|NULL" ]]; then
@@ -151,19 +130,6 @@ collect_neo4j_metrics() {
     fi
 
 
-    # ---- STORE SIZES (WAL approximation) ----
-    store_sizes_raw=$(run_cypher "$bolt_uri" \
-        "CALL db.stats.retrieve('STORE SIZES')
-         YIELD section, data
-         UNWIND data AS row
-         RETURN row.logSizeBytes AS logSize;" \
-        2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
-
-    if [[ -n "$store_sizes_raw" && "$store_sizes_raw" != "NULL" ]]; then
-        log_appended_bytes="$store_sizes_raw"
-    else
-        log "[METRIC-ERR] Store size stats unavailable on $bolt_uri"
-    fi
 
 
     # ---- INDEX STATS (best-effort) ----
@@ -748,7 +714,7 @@ log_query_plan() {
 
     ts=$(date -Iseconds)
     test_key=$(run_cypher "$bolt_uri" \
-        "MATCH (n:usertable) RETURN n.id AS id ORDER BY id LIMIT 1;" \
+        "MATCH (n:usertable) RETURN n.id AS id LIMIT 1;" \
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
 
     if [[ -n "$test_key" && "$test_key" != "NULL" ]]; then
