@@ -56,7 +56,7 @@ get_default_database() {
     run_cypher "$bolt_uri" \
         "SHOW DATABASES YIELD name, default WHERE default = true RETURN name;" \
         system \
-    | tail -n +2 | head -1 | tr -d ' '
+    | tail -n +2 | head -1 | tr -d ' "'
 }
 
 assert_apoc_available() {
@@ -71,7 +71,7 @@ assert_apoc_available() {
         return 1
     fi
 
-    apoc_output=$(run_cypher "$bolt_uri" "CALL apoc.version();" "$db" 2>&1)
+    apoc_output=$(run_cypher "$bolt_uri" "RETURN apoc.version();" "$db" 2>&1)
     log "APOC output: $apoc_output"
     if [[ $? -ne 0 || -z "$apoc_output" || "$apoc_output" == *"There is no procedure"* || "$apoc_output" == *"Failed to invoke procedure"* ]]; then
         echo "ERROR: APOC is not available on $bolt_uri. Ensure apoc.* is installed and enabled." >&2
@@ -269,27 +269,65 @@ EOF
 backup_instance() {
     local source_bolt_uri="$1"
     local target_bolt_uri="$2"
+    local source_db
+    local target_db
+    local target_count
 
     assert_apoc_available "$source_bolt_uri" || return 1
     assert_apoc_available "$target_bolt_uri" || return 1
 
-    log "Exporting database via APOC from $source_bolt_uri..."
-    run_cypher "$source_bolt_uri" \
-        "CALL apoc.export.graphml.all('$APOC_BACKUP_PATH', {useTypes: true});" \
-        >/dev/null || return 1
+    source_db=$(get_default_database "$source_bolt_uri")
+    target_db=$(get_default_database "$target_bolt_uri")
+    if [[ -z "$source_db" || -z "$target_db" ]]; then
+        echo "ERROR: Could not determine default database for APOC backup." >&2
+        return 1
+    fi
 
-    sudo cp /opt/neo4j-instance-main/import/tmp/ycsb_neo4j_backup.graphml /opt/neo4j-instance-backup/import/tmp/ycsb_neo4j_backup.graphml
-    sudo chown neo4j:neo4j /opt/neo4j-instance-backup/import/tmp/ycsb_neo4j_backup.graphml
+    log "Exporting database via APOC from $source_bolt_uri..."
+    export_result=$(run_cypher "$source_bolt_uri" \
+        "CALL apoc.export.graphml.all('$APOC_BACKUP_PATH', {useTypes: true});" \
+        "$source_db" \
+        2>&1) || return 1
+    log "APOC export result: $export_result"
+
+    if ! sudo cp "/opt/neo4j-instance-main/import/$APOC_BACKUP_PATH" "/opt/neo4j-instance-backup/import/$APOC_BACKUP_PATH"; then
+        echo "ERROR: Failed to copy APOC export file to backup import dir." >&2
+        return 1
+    fi
+    sudo chown neo4j:neo4j "/opt/neo4j-instance-backup/import/$APOC_BACKUP_PATH"
 
     log "Clearing target database on $target_bolt_uri..."
     run_cypher "$target_bolt_uri" \
         "CALL apoc.periodic.iterate('MATCH (n) RETURN n', 'DETACH DELETE n', {batchSize: 10000, parallel: false});" \
+        "$target_db" \
         >/dev/null || return 1
 
     log "Importing database via APOC into $target_bolt_uri..."
-    run_cypher "$target_bolt_uri" \
+    import_result=$(run_cypher "$target_bolt_uri" \
         "CALL apoc.import.graphml('$APOC_BACKUP_PATH', {useTypes: true});" \
+        "$target_db" \
+        2>&1) || return 1
+    log "APOC import result: $import_result"
+
+    # GraphML import does not preserve labels reliably; restore the usertable label.
+    run_cypher "$target_bolt_uri" \
+        "MATCH (n) SET n:usertable;" \
+        "$target_db" \
         >/dev/null || return 1
+
+    target_count=$(run_cypher "$target_bolt_uri" "MATCH (n:usertable) RETURN count(n);" "$target_db" \
+        | tail -n +2 | head -1 | tr -d ' ')
+    total_count=$(run_cypher "$target_bolt_uri" "MATCH (n) RETURN count(n);" "$target_db" \
+        | tail -n +2 | head -1 | tr -d ' ')
+    log "BACKUP CHECK usertable_count=$target_count total_count=$total_count"
+    if [[ -z "$total_count" || "$total_count" == "0" ]]; then
+        echo "ERROR: APOC import produced empty backup (total_count=$total_count)." >&2
+        return 1
+    fi
+    if [[ -z "$target_count" || "$target_count" == "0" ]]; then
+        echo "ERROR: APOC import produced no :usertable nodes (usertable_count=$target_count)." >&2
+        return 1
+    fi
 }
 
 measure_stats() {
@@ -378,7 +416,7 @@ UNCHANGE_NEO4J_URI="neo4j://localhost:${UNCHANGE_BOLT_PORT}"
 WORKLOAD_FILE="../workloads/workloada-extend"
 LOG_FILE="./ycsb_neo4j_results.log"
 QUERY_PLAN_LOG="./neo4j_query_plan.log"
-APOC_BACKUP_PATH="/tmp/ycsb_neo4j_backup.graphml"
+APOC_BACKUP_PATH="tmp/ycsb_neo4j_backup.graphml"
 DATASET_LOG="./dataset.log"
 OUTPUT_CSV="../analysis/neo4j_output.csv"
 
@@ -791,6 +829,38 @@ log_dataset() {
     echo "$1" >> "$DATASET_LOG"
 }
 
+get_workload_param() {
+    local key="$1"
+    local default_value="$2"
+    local value
+
+    value=$(grep -E "^${key}=" "$WORKLOAD_FILE" | tail -n 1 | cut -d= -f2)
+    if [[ -z "$value" ]]; then
+        echo "$default_value"
+    else
+        echo "$value"
+    fi
+}
+
+log_keyspace_params() {
+    local recordcount
+    local insertstart
+    local insertcount
+    local insertorder
+
+    recordcount=$(get_workload_param "recordcount" "")
+    insertstart=$(get_workload_param "insertstart" "0")
+    insertcount=$(get_workload_param "insertcount" "")
+    insertorder=$(get_workload_param "insertorder" "hashed")
+
+    if [[ -z "$insertcount" && -n "$recordcount" ]]; then
+        insertcount=$((recordcount - insertstart))
+    fi
+
+    log "KEYSPACE recordcount=$recordcount insertstart=$insertstart insertcount=$insertcount insertorder=$insertorder"
+    log_dataset "KEYSPACE recordcount=$recordcount insertstart=$insertstart insertcount=$insertcount insertorder=$insertorder"
+}
+
 log_query_plan() {
     local bolt_uri="$1"
     local phase_label="$2"
@@ -858,6 +928,7 @@ epoch=0
 run=0
 # Extract workload parameters for load phase
 source "$WORKLOAD_FILE"
+log_keyspace_params
 recordcount=${recordcount:-""}
 readallfields=${readallfields:-""}
 requestdistribution=${requestdistribution:-""}
@@ -892,6 +963,7 @@ for epoch in $(seq 1 1); do
         perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_extend/" $WORKLOAD_FILE
         perl -i -p -e "s/^operationcount=.*/operationcount=$extendoperationcount/" $WORKLOAD_FILE
         source "$WORKLOAD_FILE"
+        log_keyspace_params
         # Extract workload parameters after sourcing
         recordcount=${recordcount:-""}
         readallfields=${readallfields:-""}
@@ -940,6 +1012,7 @@ for epoch in $(seq 1 1); do
         perl -i -p -e "s/^operationcount=.*/operationcount=$original_operationcount/" $WORKLOAD_FILE
         grep -q '^fieldlengthdistribution=' "$WORKLOAD_FILE" || echo -e "\nfieldlengthdistribution=histogram" >> "$WORKLOAD_FILE"
         source "$WORKLOAD_FILE"
+        log_keyspace_params
         # Extract workload parameters after sourcing
         recordcount=${recordcount:-""}
         readallfields=${readallfields:-""}
