@@ -20,15 +20,55 @@ assert_neo4j_uri() {
 run_cypher() {
     local bolt_uri="$1"
     local query="$2"
-    shift 2 || true
+    local database="$3"
 
     assert_bolt_uri "$bolt_uri" || return 1
 
-    cypher-shell \
-        -u "$DB_USERNAME" \
-        -p "$DB_PWD" \
-        -a "$bolt_uri" \
-        "$query" "$@"
+    if [[ -n "$database" ]]; then
+        cypher-shell \
+            -u "$DB_USERNAME" \
+            -p "$DB_PWD" \
+            -a "$bolt_uri" \
+            -d "$database" \
+            --non-interactive \
+            "$query"
+    else
+        cypher-shell \
+            -u "$DB_USERNAME" \
+            -p "$DB_PWD" \
+            -a "$bolt_uri" \
+            --non-interactive \
+            "$query"
+    fi
+}
+
+get_default_database() {
+    local bolt_uri="$1"
+
+    run_cypher "$bolt_uri" \
+        "SHOW DATABASES YIELD name, default WHERE default = true RETURN name;" \
+        system \
+    | tail -n +2 | head -1 | tr -d ' '
+}
+
+assert_apoc_available() {
+    local bolt_uri="$1"
+    local apoc_output
+
+    assert_bolt_uri "$bolt_uri" || return 1
+
+    local db=$(get_default_database "$bolt_uri")
+    if [[ -z "$db" ]]; then
+        echo "ERROR: Could not determine default database on $bolt_uri" >&2
+        return 1
+    fi
+
+    apoc_output=$(run_cypher "$bolt_uri" "CALL apoc.version();" "$db" 2>&1)
+    log "APOC output: $apoc_output"
+    if [[ $? -ne 0 || -z "$apoc_output" || "$apoc_output" == *"There is no procedure"* || "$apoc_output" == *"Failed to invoke procedure"* ]]; then
+        echo "ERROR: APOC is not available on $bolt_uri. Ensure apoc.* is installed and enabled." >&2
+        return 1
+    fi
 }
 
 # Create the main YCSB label + constraint on a given instance
@@ -219,29 +259,29 @@ EOF
 
 # Database-specific function to backup database
 backup_instance() {
-    local source_home="$1"     # e.g. /opt/neo4j-instance-main
-    local source_data="$2"     # e.g. data-main
-    local target_home="$3"     # e.g. /opt/neo4j-instance-backup
-    local target_data="$4"     # e.g. data-backup
+    local source_bolt_uri="$1"
+    local target_bolt_uri="$2"
 
-    log "Stopping Neo4j source + target for backup..."
-    sudo -u neo4j "$source_home/bin/neo4j" stop || true
-    sudo -u neo4j "$target_home/bin/neo4j" stop || true
+    assert_apoc_available "$source_bolt_uri" || return 1
+    assert_apoc_available "$target_bolt_uri" || return 1
 
-    log "Copying data dir snapshot..."
-    sudo -u neo4j rm -rf "$target_home/$target_data"/*
-    sudo -u neo4j rsync -a --delete --no-times \
-    "$source_home/$source_data"/ \
-    "$target_home/$target_data"/
-    sync
+    log "Exporting database via APOC from $source_bolt_uri..."
+    run_cypher "$source_bolt_uri" \
+        "CALL apoc.export.graphml.all('$APOC_BACKUP_PATH', {useTypes: true});" \
+        >/dev/null || return 1
 
+    cp /opt/neo4j-instance-main/import/tmp/ycsb_neo4j_backup.graphml /opt/neo4j-instance-backup/import/tmp/ycsb_neo4j_backup.graphml
+    chown neo4j:neo4j /opt/neo4j-instance-backup/import/tmp/ycsb_neo4j_backup.graphml
 
-    log "Seeding password on backup instance..."
-    sudo -u neo4j "$target_home/bin/neo4j-admin" dbms set-initial-password "$DB_PWD"
+    log "Clearing target database on $target_bolt_uri..."
+    run_cypher "$target_bolt_uri" \
+        "CALL apoc.periodic.iterate('MATCH (n) RETURN n', 'DETACH DELETE n', {batchSize: 10000, parallel: false});" \
+        >/dev/null || return 1
 
-    log "Starting Neo4j source + target..."
-    sudo -u neo4j "$source_home/bin/neo4j" start
-    sudo -u neo4j "$target_home/bin/neo4j" start
+    log "Importing database via APOC into $target_bolt_uri..."
+    run_cypher "$target_bolt_uri" \
+        "CALL apoc.import.graphml('$APOC_BACKUP_PATH', {useTypes: true});" \
+        >/dev/null || return 1
 }
 
 measure_stats() {
@@ -330,6 +370,7 @@ UNCHANGE_NEO4J_URI="neo4j://localhost:${UNCHANGE_BOLT_PORT}"
 WORKLOAD_FILE="../workloads/workloada-extend"
 LOG_FILE="./ycsb_neo4j_results.log"
 QUERY_PLAN_LOG="./neo4j_query_plan.log"
+APOC_BACKUP_PATH="/tmp/ycsb_neo4j_backup.graphml"
 OUTPUT_CSV="../analysis/neo4j_output.csv"
 
 # Define input and output filenames
@@ -893,9 +934,10 @@ for epoch in $(seq 1 1); do
             
             echo "Backing up the database started"
 
-            backup_instance \
-            "/opt/neo4j-instance-main" "data-main" \
-            "/opt/neo4j-instance-backup" "data-backup"
+            if ! backup_instance "$MAIN_BOLT_URI" "$BACKUP_BOLT_URI"; then
+                log "ERROR: APOC-based backup failed. Aborting clean-run."
+                exit 1
+            fi
 
             echo "Waiting for backup Neo4j to become ready..."
             for i in {1..30}; do
