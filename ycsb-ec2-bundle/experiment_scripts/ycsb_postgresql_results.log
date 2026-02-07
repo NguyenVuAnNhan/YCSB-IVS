@@ -1,4 +1,0 @@
-=== Executing the load phase ===
-Arrangement completed. Output saved to ../analysis/Data/Workload_data/postgresql_run1_uniform_heavy_mixed.csv
-=== Setting parameter values for extend phase ===
-=== Executing the extend phase with extendproportion=1 and other proportions=0 ===
