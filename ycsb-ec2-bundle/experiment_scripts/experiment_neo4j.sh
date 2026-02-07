@@ -363,6 +363,7 @@ UNCHANGE_NEO4J_URI="neo4j://localhost:${UNCHANGE_BOLT_PORT}"
 # Define the workload file and the log file
 WORKLOAD_FILE="../workloads/workloada-extend"
 LOG_FILE="./ycsb_neo4j_results.log"
+QUERY_PLAN_LOG="./neo4j_query_plan.log"
 OUTPUT_CSV="../analysis/neo4j_output.csv"
 
 # Define input and output filenames
@@ -734,6 +735,48 @@ log() {
     echo "$1" | tee -a $LOG_FILE
 }
 
+log_query_plan() {
+    local bolt_uri="$1"
+    local phase_label="$2"
+    local instance_label="$3"
+    local ts
+    local test_key
+    local escaped_key
+    local profile_output
+
+    assert_bolt_uri "$bolt_uri" || return 1
+
+    ts=$(date -Iseconds)
+    test_key=$(run_cypher "$bolt_uri" \
+        "MATCH (n:usertable) RETURN n.id AS id ORDER BY id LIMIT 1;" \
+        2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
+
+    if [[ -n "$test_key" && "$test_key" != "NULL" ]]; then
+        escaped_key=${test_key//\'/\\\'}
+        profile_output=$(cypher-shell \
+            -u "$DB_USERNAME" \
+            -p "$DB_PWD" \
+            -a "$bolt_uri" \
+            --format verbose \
+            "PROFILE MATCH (n:usertable {id: '$escaped_key'}) RETURN n LIMIT 1;" \
+            2>/dev/null)
+    else
+        profile_output=$(cypher-shell \
+            -u "$DB_USERNAME" \
+            -p "$DB_PWD" \
+            -a "$bolt_uri" \
+            --format verbose \
+            "PROFILE MATCH (n:usertable) RETURN n LIMIT 1;" \
+            2>/dev/null)
+    fi
+
+    {
+        echo "=== QUERY PLAN $ts | epoch=$epoch run=$run phase=$phase_label instance=$instance_label uri=$bolt_uri ==="
+        echo "$profile_output"
+        echo
+    } >> "$QUERY_PLAN_LOG"
+}
+
 #----------------------------------------------------------#
 
 ######Main block of code######
@@ -745,6 +788,7 @@ initialize_database "$BACKUP_NAME"
 
 # Clear the log file and previous backups
 > $LOG_FILE
+> $QUERY_PLAN_LOG
 rm -rf $KEY_SIZE_LOG
 # Clear the value size files to start fresh
 > "$KEY_SIZE_FILE_AFTER_EXTEND"
@@ -777,8 +821,8 @@ run_ycsb_load "$UNCHANGE_NEO4J_URI"
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
 # Experiment parameters
-for epoch in $(seq 1 3); do
-    for run in $(seq 1 3); do
+for epoch in $(seq 1 1); do
+    for run in $(seq 1 1); do
         
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
@@ -855,6 +899,7 @@ for epoch in $(seq 1 3); do
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
         phase="run"
+        log_query_plan "$MAIN_BOLT_URI" "$phase" "$MAIN_NAME"
         run_ycsb_run "$MAIN_NEO4J_URI" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
         measure_stats "$MAIN_BOLT_URI"
         write_result "FALSE"
@@ -896,6 +941,7 @@ for epoch in $(seq 1 3); do
 
             echo "Backing up the database finished"
 
+            log_query_plan "$BACKUP_BOLT_URI" "$phase" "$BACKUP_NAME"
             run_ycsb_run "$BACKUP_NEO4J_URI" "-p fieldlengthhistogram=$HISTOGRAM_FILE"
             measure_stats "$BACKUP_BOLT_URI"
             write_result "FALSE"
@@ -961,6 +1007,7 @@ for epoch in $(seq 1 3); do
             # Execute the run phase
             log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
             phase="avg-run"
+            log_query_plan "$BACKUP_BOLT_URI" "$phase" "$BACKUP_NAME"
             run_ycsb_run "$BACKUP_NEO4J_URI"
             measure_stats "$BACKUP_BOLT_URI"
             write_result "FALSE"
