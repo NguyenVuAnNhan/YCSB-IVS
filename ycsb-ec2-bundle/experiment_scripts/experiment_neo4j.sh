@@ -30,6 +30,7 @@ run_cypher() {
             -p "$DB_PWD" \
             -a "$bolt_uri" \
             -d "$database" \
+            --format plain \
             --non-interactive \
             "$query"
     else
@@ -37,9 +38,16 @@ run_cypher() {
             -u "$DB_USERNAME" \
             -p "$DB_PWD" \
             -a "$bolt_uri" \
+            --format plain \
             --non-interactive \
             "$query"
     fi
+}
+
+get_field() {
+    local value="$1"
+    local idx="$2"
+    echo "$value" | tr '|' ',' | cut -d',' -f"$idx"
 }
 
 get_default_database() {
@@ -162,9 +170,9 @@ collect_neo4j_metrics() {
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
 
     if [[ -n "$graph_counts_raw" && "$graph_counts_raw" != "NULL|NULL|NULL" ]]; then
-        nodes_created=$(cut -d'|' -f1 <<<"$graph_counts_raw")
-        relationships_created=$(cut -d'|' -f2 <<<"$graph_counts_raw")
-        properties_set=$(cut -d'|' -f3 <<<"$graph_counts_raw")
+        nodes_created=$(get_field "$graph_counts_raw" 1)
+        relationships_created=$(get_field "$graph_counts_raw" 2)
+        properties_set=$(get_field "$graph_counts_raw" 3)
     else
         log "[METRIC-ERR] Graph counts unavailable on $bolt_uri"
     fi
@@ -194,8 +202,8 @@ collect_neo4j_metrics() {
         2>/dev/null | tail -n +2 | head -1 | tr -d ' ')
 
     if [[ -n "$tx_counts_raw" && "$tx_counts_raw" != "NULL|NULL" ]]; then
-        transaction_commits=$(cut -d'|' -f1 <<<"$tx_counts_raw")
-        transaction_rollbacks=$(cut -d'|' -f2 <<<"$tx_counts_raw")
+        transaction_commits=$(get_field "$tx_counts_raw" 1)
+        transaction_rollbacks=$(get_field "$tx_counts_raw" 2)
     else
         log "[METRIC-ERR] Transaction commit/rollback stats unavailable on $bolt_uri"
     fi
@@ -270,8 +278,8 @@ backup_instance() {
         "CALL apoc.export.graphml.all('$APOC_BACKUP_PATH', {useTypes: true});" \
         >/dev/null || return 1
 
-    cp /opt/neo4j-instance-main/import/tmp/ycsb_neo4j_backup.graphml /opt/neo4j-instance-backup/import/tmp/ycsb_neo4j_backup.graphml
-    chown neo4j:neo4j /opt/neo4j-instance-backup/import/tmp/ycsb_neo4j_backup.graphml
+    sudo cp /opt/neo4j-instance-main/import/tmp/ycsb_neo4j_backup.graphml /opt/neo4j-instance-backup/import/tmp/ycsb_neo4j_backup.graphml
+    sudo chown neo4j:neo4j /opt/neo4j-instance-backup/import/tmp/ycsb_neo4j_backup.graphml
 
     log "Clearing target database on $target_bolt_uri..."
     run_cypher "$target_bolt_uri" \
@@ -371,6 +379,7 @@ WORKLOAD_FILE="../workloads/workloada-extend"
 LOG_FILE="./ycsb_neo4j_results.log"
 QUERY_PLAN_LOG="./neo4j_query_plan.log"
 APOC_BACKUP_PATH="/tmp/ycsb_neo4j_backup.graphml"
+DATASET_LOG="./dataset.log"
 OUTPUT_CSV="../analysis/neo4j_output.csv"
 
 # Define input and output filenames
@@ -415,6 +424,17 @@ stats_header=$(IFS=','; echo "${binding_field_names[*]}")
 common_header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation"
 prop_header="Readprop,Updateprop,Scanprop,Insertprop,Extendprop"
 runtime_header="Runtime(ms),Throughput(ops/sec)"
+expected_dynamic_cols=(
+    "Operations"
+    "AverageLatency(us)"
+    "MinLatency(us)"
+    "MaxLatency(us)"
+    "95thPercentileLatency(us)"
+    "99thPercentileLatency(us)"
+    "Return=OK"
+    "Return=NOT_FOUND"
+)
+expected_dynamic_cols_csv=$(IFS=','; echo "${expected_dynamic_cols[*]}")
 
 extract_dynamic_fields() {
     local filtered_output="$1"
@@ -429,21 +449,18 @@ extract_dynamic_fields() {
 write_result() {
     local first="$1"
     # Remove rows not starting with specific operations and filter specific operations
-    filtered_output=$(awk '/^\[(INSERT|READ|UPDATE|SCAN|EXTEND)\]/' "$INPUT_FILE")
-    overall_output=$(awk '/^\[(OVERALL)\]/' "$INPUT_FILE")
+    filtered_output=$(awk '/^\[(INSERT|READ|UPDATE|SCAN|EXTEND)\], (Operations|AverageLatency\(us\)|MinLatency\(us\)|MaxLatency\(us\)|95thPercentileLatency\(us\)|99thPercentileLatency\(us\)|Return=OK|Return=NOT_FOUND),/' "$INPUT_FILE")
+    overall_output=$(awk '/^\[OVERALL\], (RunTime\(ms\)|Throughput\(ops\/sec\)),/' "$INPUT_FILE")
 
     # Extract Return=ERROR lines
     return_error_output=$(awk '/Return=ERROR/' "$INPUT_FILE" 2>/dev/null || echo "")
 
-    if [ "$first" == "TRUE" ]; then   
-        # Extract unique second values (except the first one) and create header
-        dynamic_cols=$(awk '{print $2}' <<< "$filtered_output" | sed 's/,$//' | uniq | awk '{ORS=","; print}' | sed 's/,$//')
-        if [ -n "$dynamic_cols" ]; then
-            header="$common_header,$stats_header,$prop_header,$runtime_header,RETURN=ERROR,$dynamic_cols"
-        else
-            header="$common_header,$stats_header,$prop_header,$runtime_header,RETURN=ERROR"
-        fi
+    if [ "$first" == "TRUE" ]; then
+        header="$common_header,$stats_header,$prop_header,$runtime_header,RETURN=ERROR,$expected_dynamic_cols_csv"
         echo "$header" > "$OUTPUT_FILE"
+        log_dataset "=== HEADER epoch=${epoch:-} run=${run:-} phase=${phase:-} ==="
+        log_dataset "$header"
+        log_dataset ""
     fi
 
     # Set default values for epoch and run if not set (e.g., during load phase)
@@ -476,6 +493,28 @@ write_result() {
         tmp=$(echo "$inner_line" | awk '{print $3}' | sed 's/,$//')
         run_specific+=("$tmp")
     done <<< "$overall_output"
+    # Ensure only runtime + throughput are kept
+    if [ "${#run_specific[@]}" -gt 2 ]; then
+        run_specific=("${run_specific[@]:0:2}")
+    fi
+    log_dataset "=== INPUTS epoch=$epoch run=$run phase=$phase ==="
+    log_dataset "[overall_output]"
+    if [ -n "$overall_output" ]; then
+        while IFS= read -r inner_line; do
+            log_dataset "$inner_line"
+        done <<< "$overall_output"
+    else
+        log_dataset "<empty>"
+    fi
+    log_dataset "[filtered_output]"
+    if [ -n "$filtered_output" ]; then
+        while IFS= read -r inner_line; do
+            log_dataset "$inner_line"
+        done <<< "$filtered_output"
+    else
+        log_dataset "<empty>"
+    fi
+    log_dataset "run_specific=${run_specific[*]}"
 
     # Extract Return=ERROR value (third field from Return=ERROR line)
     return_error_value=""
@@ -483,21 +522,29 @@ write_result() {
         return_error_value=$(echo "$return_error_output" | awk '{print $3}' | sed 's/,$//' | head -1)
     fi
     return_error_value=${return_error_value:-"0"}
+    log_dataset "return_error_value=$return_error_value"
 
-    # Iterate through each line
+    # Collect metrics per operation
     values_1=""
     values_2=""
-    k=1
-    p=1
-    prev_operation=""
-    # Initialize operation to empty in case filtered_output is empty
-    operation=""
+    declare -A op_metric_values
+    op_list=()
     while IFS= read -r line; do
-        # Extract operation and third value
         operation=$(echo "$line" | awk '{print $1}' | sed 's/,$//' | tr -d '[]')
+        metric=$(echo "$line" | awk '{print $2}' | sed 's/,$//')
         third_value=$(echo "$line" | awk '{print $3}' | sed 's/,$//')
 
-        # Populate field arrays dynamically
+        if [ -z "${op_metric_values["$operation|__seen"]+x}" ]; then
+            op_list+=("$operation")
+            op_metric_values["$operation|__seen"]=1
+        fi
+        op_metric_values["$operation|$metric"]="$third_value"
+    done <<< "$filtered_output"
+
+    # Build rows with fixed metric ordering (fill missing values with 0)
+    for idx in "${!op_list[@]}"; do
+        operation="${op_list[$idx]}"
+
         common_fields=(
             "$r"
             "$phase"
@@ -507,10 +554,8 @@ write_result() {
             "$operation"
         )
 
-        # Populate binding_fields from database-specific metrics using binding_field_names
         binding_fields=()
         for field_name in "${binding_field_names[@]}"; do
-            # Use indirect variable reference to get the value
             binding_fields+=("${!field_name}")
         done
 
@@ -522,45 +567,45 @@ write_result() {
             "$extendproportion"
         )
 
-        dynamic_fields=("${run_specific[@]}" "$return_error_value" "$third_value")
+        dynamic_fields=("${run_specific[@]}" "$return_error_value")
+        for metric_name in "${expected_dynamic_cols[@]}"; do
+            key="$operation|$metric_name"
+            dynamic_fields+=("${op_metric_values[$key]:-0}")
+        done
+        log_dataset "op=$operation prop_fields=${prop_fields[*]}"
+        log_dataset "op=$operation dynamic_fields=${dynamic_fields[*]}"
 
-        # Append to the values variable
-        if [ $k -eq 1 ]; then
-            row_fields=(
-                "${common_fields[@]}"
-                "${binding_fields[@]}"
-                "${prop_fields[@]}"
-                "${dynamic_fields[@]}"
-            )
+        row_fields=(
+            "${common_fields[@]}"
+            "${binding_fields[@]}"
+            "${prop_fields[@]}"
+            "${dynamic_fields[@]}"
+        )
 
-            # join with commas (use subshell to avoid affecting global IFS)
-            values_1=$(IFS=','; echo "${row_fields[*]}")
-
-            k=$((k + 1))
-            prev_operation="$operation"
-        elif [ $p -eq 1 ] && [ "$prev_operation" == "$operation" ]; then
-            values_1="$values_1,$third_value"
-        elif [ $p -eq 1 ] && [ "$prev_operation" != "$operation" ]; then
-            row_fields=(
-                "${common_fields[@]}"
-                "${binding_fields[@]}"
-                "${prop_fields[@]}"
-                "${dynamic_fields[@]}"
-            )
-
-            # join with commas (use subshell to avoid affecting global IFS)
-            values_2=$(IFS=','; echo "${row_fields[*]}")
-
-            p=$((p + 1))
-            prev_operation="$operation"
-        else
-            values_2="$values_2,$third_value"
+        row_value=$(IFS=','; echo "${row_fields[*]}")
+        # Column index dump to help debug alignment issues
+        idx_log=""
+        for idx_i in "${!row_fields[@]}"; do
+            idx_log+="$((idx_i + 1))=${row_fields[$idx_i]} "
+        done
+        log_dataset "op=$operation col_dump=$idx_log"
+        if [ "$idx" -eq 0 ]; then
+            values_1="$row_value"
+        elif [ "$idx" -eq 1 ]; then
+            values_2="$row_value"
         fi
-    done <<< "$filtered_output"
+    done
 
     # Print the values to the output file (only if not empty)
-    [ -n "$values_1" ] && echo "$values_1" >> "$OUTPUT_FILE"
-    [ -n "$values_2" ] && echo "$values_2" >> "$OUTPUT_FILE"
+    if [ -n "$values_1" ]; then
+        echo "$values_1" >> "$OUTPUT_FILE"
+        log_dataset "[row1] $values_1"
+    fi
+    if [ -n "$values_2" ]; then
+        echo "$values_2" >> "$OUTPUT_FILE"
+        log_dataset "[row2] $values_2"
+    fi
+    log_dataset ""
 
     # Print completion message
     echo "Arrangement completed. Output saved to $OUTPUT_FILE"
@@ -742,6 +787,10 @@ log() {
     echo "$1" | tee -a $LOG_FILE
 }
 
+log_dataset() {
+    echo "$1" >> "$DATASET_LOG"
+}
+
 log_query_plan() {
     local bolt_uri="$1"
     local phase_label="$2"
@@ -796,6 +845,7 @@ initialize_database "$BACKUP_NAME"
 # Clear the log file and previous backups
 > $LOG_FILE
 > $QUERY_PLAN_LOG
+> $DATASET_LOG
 rm -rf $KEY_SIZE_LOG
 # Clear the value size files to start fresh
 > "$KEY_SIZE_FILE_AFTER_EXTEND"
