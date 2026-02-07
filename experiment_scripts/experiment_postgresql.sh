@@ -38,6 +38,9 @@ KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_postgre
 KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_postgresql_run1_uniform_heavy_after_mixed.csv"
 HISTOGRAM_FILE="histogram.txt"
 
+# VACUUM settings
+vacuum=1
+
 # Extend phase experiment parameters
 extendproportion_extend="1"
 readproportion_extend="0"
@@ -424,6 +427,12 @@ for epoch in $(seq 1 10); do
             append_subsequent_iterations $KEY_SIZE_LOG $KEY_SIZE_FILE_AFTER_EXTEND
         fi
 
+        if [[ $vacuum -eq 1 ]]; then
+            log "VACUUM start: $(date +%s)"
+            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c "VACUUM ANALYZE VERBOSE usertable;"
+            log "VACUUM end: $(date +%s)"
+        fi
+
         # Setting parameter values for run phase
         log "=== Setting parameter values for run phase ==="
         perl -i -p -e "s/^extendproportion=.*/extendproportion=$extendproportion_postextend/" $WORKLOAD_FILE
@@ -438,6 +447,7 @@ for epoch in $(seq 1 10); do
         perl -i -p -e "s/^operationcount=.*/operationcount=$original_operationcount/" $WORKLOAD_FILE
         grep -q '^fieldlengthdistribution=' "$WORKLOAD_FILE" || echo -e "\nfieldlengthdistribution=histogram" >> "$WORKLOAD_FILE"
         source "$WORKLOAD_FILE"
+
         # Extract workload parameters after sourcing
         recordcount=${recordcount:-""}
         readallfields=${readallfields:-""}
@@ -454,6 +464,27 @@ for epoch in $(seq 1 10); do
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
         -c "SELECT ycsb_key
             FROM usertable;" > keys_before_run.txt
+
+        # Log query plan before run phase
+        log "Checking query plan before run phase"
+
+        TEST_KEY=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -c \
+        "SELECT ycsb_key FROM usertable LIMIT 1;")
+
+        {
+            echo "========================================"
+            echo "Epoch=$epoch Run=$run Phase=run Time=$(date)"
+            echo "DB=$DB_NAME"
+            echo "Key=$TEST_KEY"
+            echo "----------------------------------------"
+
+            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c "
+            EXPLAIN (ANALYZE, BUFFERS)
+            SELECT * FROM usertable WHERE ycsb_key = '$TEST_KEY';
+            "
+
+            echo
+        } >> "$PLAN_LOG"
 
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
