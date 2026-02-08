@@ -161,6 +161,7 @@ LICENSE file.
   <modules>
     <module>binding-parent</module>
     <module>core</module>
+    <module>jdbc-array</module>
     <module>jdbc</module>
     <module>mongodb</module>
     <module>neo4j</module>

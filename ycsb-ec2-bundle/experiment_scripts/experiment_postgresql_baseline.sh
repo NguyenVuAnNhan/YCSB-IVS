@@ -10,6 +10,14 @@ export PATH="$YCSB_HOME/bin:$PATH"
 
 YCSB="../bin/ycsb.sh"
 
+# Ensure core dependencies are staged for source-run
+ensure_core_dependencies() {
+    if [ ! -d "$YCSB_HOME/core/target/dependency" ]; then
+        echo "[WARN] core/target/dependency missing; building core with -Psource-run..."
+        mvn -Psource-run -pl site.ycsb:core -am package -DskipTests
+    fi
+}
+
 # DB names
 DB_NAME="ycsb"
 BACKUP_DB_NAME="ycsb_backup"
@@ -49,7 +57,7 @@ readmodifywriteproportion_postextend="0"
 requestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="100000"
+extendoperationcount="10000"
 
 # Initialize PostgreSQL database
 initialize_database() {
@@ -68,6 +76,7 @@ initialize_database() {
     echo "Done initializing."
 }
 
+ensure_core_dependencies
 initialize_database
 
 # Function to log and print messages

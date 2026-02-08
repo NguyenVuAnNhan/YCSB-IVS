@@ -114,6 +114,11 @@ if [ "$BINDING_NAME" = "basic" ] ; then
   BINDING_DIR=core
 fi
 
+# Override binding dir for jdbc-array binding
+if [ "$BINDING_NAME" = "jdbc-array" ] ; then
+  BINDING_DIR="jdbc-array"
+fi
+
 # For Cygwin, ensure paths are in UNIX format before anything is touched
 if $CYGWIN; then
   [ -n "$JAVA_HOME" ] && JAVA_HOME=$(cygpath --unix "$JAVA_HOME")

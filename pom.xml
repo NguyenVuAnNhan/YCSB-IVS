@@ -161,6 +161,7 @@ LICENSE file.
   <modules>
     <module>ycsb-ec2-bundle/binding-parent</module>
     <module>ycsb-ec2-bundle/core</module>
+    <module>ycsb-ec2-bundle/jdbc-array</module>
     <module>ycsb-ec2-bundle/jdbc</module>
     <module>ycsb-ec2-bundle/mongodb</module>
     <module>ycsb-ec2-bundle/neo4j</module>

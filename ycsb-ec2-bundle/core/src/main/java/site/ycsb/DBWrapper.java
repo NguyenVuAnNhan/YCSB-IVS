@@ -52,6 +52,7 @@ public class DBWrapper extends DB {
   private final String scopeStringRead;
   private final String scopeStringScan;
   private final String scopeStringUpdate;
+  private final String scopeStringExtend;
 
   public DBWrapper(final DB db, final Tracer tracer) {
     this.db = db;
@@ -65,6 +66,7 @@ public class DBWrapper extends DB {
     scopeStringRead = simple + "#read";
     scopeStringScan = simple + "#scan";
     scopeStringUpdate = simple + "#update";
+    scopeStringExtend = simple + "#extend";
   }
 
   /**
@@ -262,7 +264,7 @@ public class DBWrapper extends DB {
    */
   @Override
   public Status extend(String table, String key, Map<String, ByteIterator> values, long maxfieldlength) {
-    try (final TraceScope span = tracer.newScope(scopeStringInsert)) {
+    try (final TraceScope span = tracer.newScope(scopeStringExtend)) {
       long ist = measurements.getIntendedStartTimeNs();
       long st = System.nanoTime();
       Status res = db.extend(table, key, values, maxfieldlength);

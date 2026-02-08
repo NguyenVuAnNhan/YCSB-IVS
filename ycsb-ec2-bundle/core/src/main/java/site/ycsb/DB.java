@@ -122,22 +122,7 @@ public abstract class DB {
    * @return The result of the operation.
    */
   public Status extend(String table, String key, Map<String, ByteIterator> values, long maxfieldlength) {
-    HashMap<String, ByteIterator> result = new HashMap<String, ByteIterator>();
-    Set<String> fields = values.keySet();
-
-    Status status = read(table, key, fields, result);
-    if (status == Status.OK) {
-      for (String fieldkey : fields) {
-        String orig = result.get(fieldkey).toString();
-        String incr = values.get(fieldkey).toString();
-        if (orig.length() + incr.length() < maxfieldlength) {
-          result.put(fieldkey, new StringByteIterator(orig + incr));
-        }
-      }
-      status = update(table, key, result);
-    }
-
-    return status;
+    return Status.NOT_IMPLEMENTED;
   }
 
   /**

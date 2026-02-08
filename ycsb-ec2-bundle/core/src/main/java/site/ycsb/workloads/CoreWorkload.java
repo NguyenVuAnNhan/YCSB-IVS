@@ -960,15 +960,10 @@ public class CoreWorkload extends Workload {
     String keyname = CoreWorkload.buildKeyName(keynum, zeropadding, orderedinserts);
 
     HashMap<String, ByteIterator> values;
-    
-    if (writeallfields) {
-      // new data for all the fields
-      values = buildValuesExtend(keyname);
-    } else {
-      // update a random field
-      values = buildSingleValueExtend(keyname);
-    }
-    
+
+    // extend a single random field
+    values = buildSingleValueExtend(keyname);
+
     db.extend(table, keyname, values, maxfieldlength);
   }
 
