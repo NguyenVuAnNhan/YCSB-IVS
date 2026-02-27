@@ -161,6 +161,8 @@ LICENSE file.
   <modules>
     <module>binding-parent</module>
     <module>core</module>
+    <module>couchbase</module>
+    <module>couchbase2</module>
     <module>jdbc-array</module>
     <module>jdbc</module>
     <module>mongodb</module>
