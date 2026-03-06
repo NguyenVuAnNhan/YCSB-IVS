@@ -431,6 +431,49 @@ public class JdbcDBClient extends DB {
   }
 
   @Override
+  public Status extend(String tableName, String key, Map<String, ByteIterator> values, long maxfieldlength) {
+    if (values == null || values.isEmpty()) {
+      return Status.BAD_REQUEST;
+    }
+
+    Map.Entry<String, ByteIterator> entry = values.entrySet().iterator().next();
+    String fieldName = entry.getKey();
+    String appendValue = entry.getValue() == null ? "" : entry.getValue().toString();
+
+    try {
+      StatementType type = new StatementType(StatementType.Type.READ, tableName, 1, "", getShardIndexByKey(key));
+      PreparedStatement readStatement = cachedStatements.get(type);
+      if (readStatement == null) {
+        readStatement = createAndCacheReadStatement(type, key);
+      }
+      readStatement.setString(1, key);
+
+      try (ResultSet resultSet = readStatement.executeQuery()) {
+        if (!resultSet.next()) {
+          return Status.NOT_FOUND;
+        }
+
+        String currentValue = resultSet.getString(fieldName);
+        if (currentValue == null) {
+          currentValue = "";
+        }
+
+        String nextValue = currentValue + appendValue;
+        if (maxfieldlength >= 0 && maxfieldlength < nextValue.length()) {
+          nextValue = nextValue.substring(0, (int) maxfieldlength);
+        }
+
+        HashMap<String, ByteIterator> extendedField = new HashMap<>();
+        extendedField.put(fieldName, new StringByteIterator(nextValue));
+        return update(tableName, key, extendedField);
+      }
+    } catch (SQLException e) {
+      System.err.println("Error in processing extend to table: " + tableName + e);
+      return Status.ERROR;
+    }
+  }
+
+  @Override
   public Status insert(String tableName, String key, Map<String, ByteIterator> values) {
     try {
       int numFields = values.size();

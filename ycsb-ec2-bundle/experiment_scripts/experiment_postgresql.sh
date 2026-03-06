@@ -371,6 +371,10 @@ for epoch in $(seq 1 10); do
         extend_failed_count=$(grep -oP 'EXTEND-FAILED: Count=\K\d+' "$OUTPUT_CSV" | head -1 || echo "0")
         if [ -n "$extend_failed_count" ] && [ "$extend_failed_count" != "0" ]; then
             log "WARNING: $extend_failed_count EXTEND operations failed during extend phase"
+            if [ "$extend_failed_count" -ge "$extendoperationcount" ]; then
+                log "ERROR: All EXTEND operations failed. Check JDBC binding extend() implementation and DB schema compatibility."
+                exit 1
+            fi
         fi
         
         cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
@@ -615,7 +619,8 @@ for epoch in $(seq 1 10); do
             # Set average field length
             if [ -z "$total_size" ] || [ -z "$recordcount" ] || [ "$recordcount" -eq 0 ]; then
                 log "Warning: Cannot calculate fieldlengthaverage - total_size=$total_size, recordcount=$recordcount"
-                fieldlengthaverage="$fieldlengthoriginal"
+                fieldlengthaverage=$(grep -E '^fieldlength=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+                fieldlengthaverage=${fieldlengthaverage:-$fieldlengthoriginal}
             else
                 fieldlengthaverage=$(echo "$total_size / (10 * $recordcount)" | bc)
             fi
@@ -645,8 +650,7 @@ for epoch in $(seq 1 10); do
             total_size_avg_run=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(field0) + octet_length(field1) + octet_length(field2) + octet_length(field3) + octet_length(field4) + octet_length(field5) + octet_length(field6) + octet_length(field7) + octet_length(field8) + octet_length(field9)) FROM usertable;")
             log "Avg-run verification - Epoch:$epoch Run:$run Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
             
-            # Chainging the value size for comparison
-            perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthoriginal/" $WORKLOAD_FILE
+            # Keep fieldlength at the newly computed average for this run.
             source "$WORKLOAD_FILE"
 
             # Execute the run phase
