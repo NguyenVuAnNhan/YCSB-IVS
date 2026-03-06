@@ -381,6 +381,49 @@ public class Couchbase2Client extends DB {
   }
 
   @Override
+  public Status extend(final String table, final String key, final Map<String, ByteIterator> values,
+      final long maxfieldlength) {
+    if (values == null || values.isEmpty()) {
+      return Status.BAD_REQUEST;
+    }
+
+    try {
+      String docId = formatId(table, key);
+      RawJsonDocument loaded = bucket.get(docId, RawJsonDocument.class);
+      if (loaded == null) {
+        return Status.NOT_FOUND;
+      }
+
+      Map.Entry<String, ByteIterator> entry = values.entrySet().iterator().next();
+      String field = entry.getKey();
+      String appendValue = entry.getValue() == null ? "" : entry.getValue().toString();
+
+      JsonObject content = JsonObject.fromJson(loaded.content());
+      String currentValue = content.getString(field);
+      if (currentValue == null) {
+        currentValue = "";
+      }
+
+      String nextValue = currentValue + appendValue;
+      if (maxfieldlength >= 0 && nextValue.length() > maxfieldlength) {
+        nextValue = nextValue.substring(0, (int) maxfieldlength);
+      }
+
+      content.put(field, nextValue);
+      waitForMutationResponse(bucket.async().replace(
+          RawJsonDocument.create(docId, documentExpiry, content.toString()),
+          persistTo,
+          replicateTo
+      ));
+
+      return Status.OK;
+    } catch (Exception ex) {
+      ex.printStackTrace();
+      return Status.ERROR;
+    }
+  }
+
+  @Override
   public Status insert(final String table, final String key, final Map<String, ByteIterator> values) {
     if (upsert) {
       return upsert(table, key, values);
