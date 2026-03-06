@@ -25,6 +25,10 @@ COUCHBASE_PASSWORD="USyd2025"
 # Note: for the couchbase binding, records are addressed by key in a bucket.
 # There is no relational "table" concept.
 COUCHBASE_BOOST="1"
+COUCHBASE_KV_MODE="auto"
+COUCHBASE_KV_ENABLED="true"
+RESET_BUCKET_BEFORE_RUN="true"
+FLUSH_FAILURE_STRATEGY="offset"
 INSERTION_RETRY_LIMIT="20"
 INSERTION_RETRY_INTERVAL="2"
 MAX_EXCEPTION_BLOCKS="3"
@@ -120,6 +124,137 @@ preflight_couchbase_or_die() {
         log "[ERROR] Aborting before YCSB phases for correctness."
         exit 1
     fi
+
+    resolve_couchbase_kv_mode_or_die
+}
+
+tcp_port_open() {
+    local host="$1"
+    local port="$2"
+    timeout 2 bash -c "</dev/tcp/$host/$port" >/dev/null 2>&1
+}
+
+resolve_couchbase_kv_mode_or_die() {
+    local kv_port_open query_port_open
+
+    kv_port_open="false"
+    query_port_open="false"
+
+    if tcp_port_open "$COUCHBASE_HOST" 11210; then
+        kv_port_open="true"
+    fi
+    if tcp_port_open "$COUCHBASE_HOST" 8093; then
+        query_port_open="true"
+    fi
+
+    case "$COUCHBASE_KV_MODE" in
+        true)
+            COUCHBASE_KV_ENABLED="true"
+            ;;
+        false)
+            COUCHBASE_KV_ENABLED="false"
+            ;;
+        auto)
+            if [ "$kv_port_open" = "true" ]; then
+                COUCHBASE_KV_ENABLED="true"
+            elif [ "$query_port_open" = "true" ]; then
+                COUCHBASE_KV_ENABLED="false"
+                log "[WARN] KV port 11210 is not reachable; falling back to N1QL mode (couchbase.kv=false)."
+            else
+                log "[ERROR] Neither KV port 11210 nor Query port 8093 is reachable on $COUCHBASE_HOST."
+                log "[ERROR] Aborting before YCSB phases for correctness."
+                exit 1
+            fi
+            ;;
+        *)
+            log "[ERROR] Invalid COUCHBASE_KV_MODE='$COUCHBASE_KV_MODE'. Expected true, false, or auto."
+            exit 1
+            ;;
+    esac
+
+    if [ "$COUCHBASE_KV_ENABLED" = "true" ] && [ "$kv_port_open" != "true" ]; then
+        log "[ERROR] COUCHBASE_KV_MODE requires KV operations, but port 11210 is unreachable."
+        exit 1
+    fi
+    if [ "$COUCHBASE_KV_ENABLED" = "false" ] && [ "$query_port_open" != "true" ]; then
+        log "[ERROR] COUCHBASE_KV_MODE requires N1QL operations, but Query port 8093 is unreachable."
+        exit 1
+    fi
+
+    log "Couchbase access mode: couchbase.kv=$COUCHBASE_KV_ENABLED (auto mode=$COUCHBASE_KV_MODE, kv11210=$kv_port_open, query8093=$query_port_open)"
+}
+
+flush_couchbase_bucket_or_die() {
+    if [ "$RESET_BUCKET_BEFORE_RUN" != "true" ]; then
+        log "Bucket reset skipped (RESET_BUCKET_BEFORE_RUN=false)."
+        return
+    fi
+
+    log "=== Resetting Couchbase bucket before run ==="
+    local flush_http
+    flush_http=$(curl -s -u "$COUCHBASE_USERNAME:$COUCHBASE_PASSWORD" \
+        -X POST -o /dev/null -w "%{http_code}" \
+        "http://$COUCHBASE_HOST:8091/pools/default/buckets/$COUCHBASE_BUCKET/controller/doFlush" || true)
+
+    if [ "$flush_http" != "200" ] && [ "$flush_http" != "202" ]; then
+        if [ "$FLUSH_FAILURE_STRATEGY" = "offset" ]; then
+            log "[WARN] Failed to flush bucket '$COUCHBASE_BUCKET' (HTTP $flush_http)."
+            log "[WARN] Falling back to unique insertstart offset strategy."
+            apply_unique_insertstart_offset
+            return
+        fi
+        log "[ERROR] Failed to flush bucket '$COUCHBASE_BUCKET' (HTTP $flush_http)."
+        log "[ERROR] Enable bucket flush in Couchbase settings, or set FLUSH_FAILURE_STRATEGY=offset to avoid duplicate keys."
+        exit 1
+    fi
+
+    log "Bucket flush requested successfully (HTTP $flush_http)."
+}
+
+set_workload_property() {
+    local key="$1"
+    local value="$2"
+    if grep -qE "^${key}=" "$WORKLOAD_FILE"; then
+        perl -i -p -e "s/^${key}=.*/${key}=${value}/" "$WORKLOAD_FILE"
+    else
+        printf "%s=%s\n" "$key" "$value" >> "$WORKLOAD_FILE"
+    fi
+}
+
+delete_workload_property() {
+    local key="$1"
+    perl -i -ne "print unless /^${key}=/" "$WORKLOAD_FILE"
+}
+
+get_couchbase_bucket_item_count() {
+    local bucket_json
+    bucket_json=$(curl -s -u "$COUCHBASE_USERNAME:$COUCHBASE_PASSWORD" \
+        "http://$COUCHBASE_HOST:8091/pools/default/buckets/$COUCHBASE_BUCKET" || true)
+    perl -ne 'if (/"itemCount"\s*:\s*([0-9]+)/) { print $1; exit }' <<< "$bucket_json"
+}
+
+apply_unique_insertstart_offset() {
+    local original_recordcount existing_item_count effective_insertstart adjusted_recordcount
+
+    original_recordcount=$(awk -F= '/^recordcount=/{print $2}' "$WORKLOAD_FILE" | tail -1)
+    if ! [[ "$original_recordcount" =~ ^[0-9]+$ ]]; then
+        log "[WARN] Unable to parse workload recordcount ('$original_recordcount'); defaulting to 0 for offset calculation."
+        original_recordcount=0
+    fi
+
+    existing_item_count=$(get_couchbase_bucket_item_count)
+    if ! [[ "$existing_item_count" =~ ^[0-9]+$ ]]; then
+        log "[WARN] Unable to read current Couchbase itemCount; using insertstart=0 fallback."
+        existing_item_count=0
+    fi
+
+    effective_insertstart="$existing_item_count"
+    adjusted_recordcount=$((effective_insertstart + original_recordcount))
+
+    set_workload_property "insertstart" "$effective_insertstart"
+    set_workload_property "recordcount" "$adjusted_recordcount"
+    delete_workload_property "insertcount"
+    log "Applied insert offset fallback: insertstart=$effective_insertstart, recordcount=$adjusted_recordcount (base recordcount=$original_recordcount, existing items=$existing_item_count)."
 }
 
 append_limited_stderr() {
@@ -207,6 +342,11 @@ validate_ycsb_outcome_or_die() {
     fi
 }
 
+stderr_has_kv_cancellation_issue() {
+    local stderr_file="$1"
+    grep -q "RequestCancelledException" "$stderr_file"
+}
+
 print_workload_debug_snapshot() {
     if [ -f "$WORKLOAD_FILE" ]; then
         local rc oc rp up ip ep reqd
@@ -254,21 +394,46 @@ run_ycsb_load() {
     log "Running YCSB load with couchbase2 binding..."
     print_workload_debug_snapshot
     local stderr_tmp
+    local stderr_for_validation
     local rc
     stderr_tmp=$(mktemp)
+    stderr_for_validation="$stderr_tmp"
     set +e
     "$YCSB" load couchbase2 -s -P "$WORKLOAD_FILE" \
         -p couchbase.host="$COUCHBASE_HOST" \
         -p couchbase.bucket="$COUCHBASE_BUCKET" \
         -p couchbase.password="$COUCHBASE_PASSWORD" \
+        -p couchbase.kv="$COUCHBASE_KV_ENABLED" \
         -p couchbase.boost="$COUCHBASE_BOOST" \
         -p core_workload_insertion_retry_limit="$INSERTION_RETRY_LIMIT" \
         -p core_workload_insertion_retry_interval="$INSERTION_RETRY_INTERVAL" > "$OUTPUT_CSV" 2>"$stderr_tmp"
     rc=$?
     set -e
     append_limited_stderr "$stderr_tmp" "load"
+    if [ "$COUCHBASE_KV_ENABLED" = "true" ] && stderr_has_kv_cancellation_issue "$stderr_tmp" && tcp_port_open "$COUCHBASE_HOST" 8093; then
+        log "[WARN] Detected KV request cancellations during load; retrying once with couchbase.kv=false (N1QL mode)."
+        COUCHBASE_KV_ENABLED="false"
+        local retry_stderr_tmp
+        retry_stderr_tmp=$(mktemp)
+        set +e
+        "$YCSB" load couchbase2 -s -P "$WORKLOAD_FILE" \
+            -p couchbase.host="$COUCHBASE_HOST" \
+            -p couchbase.bucket="$COUCHBASE_BUCKET" \
+            -p couchbase.password="$COUCHBASE_PASSWORD" \
+            -p couchbase.kv="$COUCHBASE_KV_ENABLED" \
+            -p couchbase.boost="$COUCHBASE_BOOST" \
+            -p core_workload_insertion_retry_limit="$INSERTION_RETRY_LIMIT" \
+            -p core_workload_insertion_retry_interval="$INSERTION_RETRY_INTERVAL" > "$OUTPUT_CSV" 2>"$retry_stderr_tmp"
+        rc=$?
+        set -e
+        append_limited_stderr "$retry_stderr_tmp" "load-retry-n1ql"
+        stderr_for_validation="$retry_stderr_tmp"
+    fi
     LAST_YCSB_EXIT_CODE=$rc
-    validate_ycsb_outcome_or_die "load" "$rc" "$stderr_tmp"
+    validate_ycsb_outcome_or_die "load" "$rc" "$stderr_for_validation"
+    if [ "$stderr_for_validation" != "$stderr_tmp" ]; then
+        rm -f "$stderr_for_validation"
+    fi
     rm -f "$stderr_tmp"
 }
 
@@ -276,21 +441,46 @@ run_ycsb_run() {
     log "Running YCSB run with couchbase2 binding..."
     print_workload_debug_snapshot
     local stderr_tmp
+    local stderr_for_validation
     local rc
     stderr_tmp=$(mktemp)
+    stderr_for_validation="$stderr_tmp"
     set +e
     "$YCSB" run couchbase2 -s -P "$WORKLOAD_FILE" \
         -p couchbase.host="$COUCHBASE_HOST" \
         -p couchbase.bucket="$COUCHBASE_BUCKET" \
         -p couchbase.password="$COUCHBASE_PASSWORD" \
+        -p couchbase.kv="$COUCHBASE_KV_ENABLED" \
         -p couchbase.boost="$COUCHBASE_BOOST" \
         -p core_workload_insertion_retry_limit="$INSERTION_RETRY_LIMIT" \
         -p core_workload_insertion_retry_interval="$INSERTION_RETRY_INTERVAL" > "$OUTPUT_CSV" 2>"$stderr_tmp"
     rc=$?
     set -e
     append_limited_stderr "$stderr_tmp" "run"
+    if [ "$COUCHBASE_KV_ENABLED" = "true" ] && stderr_has_kv_cancellation_issue "$stderr_tmp" && tcp_port_open "$COUCHBASE_HOST" 8093; then
+        log "[WARN] Detected KV request cancellations during run; retrying once with couchbase.kv=false (N1QL mode)."
+        COUCHBASE_KV_ENABLED="false"
+        local retry_stderr_tmp
+        retry_stderr_tmp=$(mktemp)
+        set +e
+        "$YCSB" run couchbase2 -s -P "$WORKLOAD_FILE" \
+            -p couchbase.host="$COUCHBASE_HOST" \
+            -p couchbase.bucket="$COUCHBASE_BUCKET" \
+            -p couchbase.password="$COUCHBASE_PASSWORD" \
+            -p couchbase.kv="$COUCHBASE_KV_ENABLED" \
+            -p couchbase.boost="$COUCHBASE_BOOST" \
+            -p core_workload_insertion_retry_limit="$INSERTION_RETRY_LIMIT" \
+            -p core_workload_insertion_retry_interval="$INSERTION_RETRY_INTERVAL" > "$OUTPUT_CSV" 2>"$retry_stderr_tmp"
+        rc=$?
+        set -e
+        append_limited_stderr "$retry_stderr_tmp" "run-retry-n1ql"
+        stderr_for_validation="$retry_stderr_tmp"
+    fi
     LAST_YCSB_EXIT_CODE=$rc
-    validate_ycsb_outcome_or_die "run" "$rc" "$stderr_tmp"
+    validate_ycsb_outcome_or_die "run" "$rc" "$stderr_for_validation"
+    if [ "$stderr_for_validation" != "$stderr_tmp" ]; then
+        rm -f "$stderr_for_validation"
+    fi
     rm -f "$stderr_tmp"
 }
 
@@ -403,6 +593,7 @@ backup_workload_file
 trap restore_workload_file EXIT
 print_couchbase_debug_snapshot
 preflight_couchbase_or_die
+flush_couchbase_bucket_or_die
 
 log "=== Executing the load phase ==="
 phase="load"
