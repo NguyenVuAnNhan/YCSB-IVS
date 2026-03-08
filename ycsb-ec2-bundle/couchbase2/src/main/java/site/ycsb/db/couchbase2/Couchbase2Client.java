@@ -364,12 +364,29 @@ public class Couchbase2Client extends DB {
    */
   private Status updateN1ql(final String docId, final Map<String, ByteIterator> values)
     throws Exception {
-    String fields = encodeN1qlFields(values);
+    if (values == null || values.isEmpty()) {
+      return Status.BAD_REQUEST;
+    }
+
+    StringBuilder fields = new StringBuilder();
+    JsonArray params = JsonArray.create().add(docId);
+    int placeholder = 2;
+    int idx = 0;
+    for (Map.Entry<String, ByteIterator> entry : values.entrySet()) {
+      String escapedField = entry.getKey().replace("`", "``");
+      if (idx++ > 0) {
+        fields.append(", ");
+      }
+      fields.append("`").append(escapedField).append("`").append("=$").append(placeholder++);
+      String value = entry.getValue() == null ? "" : entry.getValue().toString();
+      params.add(value);
+    }
+
     String updateQuery = "UPDATE `" + bucketName + "` USE KEYS [$1] SET " + fields;
 
     N1qlQueryResult queryResult = bucket.query(N1qlQuery.parameterized(
         updateQuery,
-        JsonArray.from(docId),
+        params,
         N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
     ));
 
@@ -389,38 +406,94 @@ public class Couchbase2Client extends DB {
 
     try {
       String docId = formatId(table, key);
-      RawJsonDocument loaded = bucket.get(docId, RawJsonDocument.class);
-      if (loaded == null) {
-        return Status.NOT_FOUND;
-      }
-
       Map.Entry<String, ByteIterator> entry = values.entrySet().iterator().next();
       String field = entry.getKey();
       String appendValue = entry.getValue() == null ? "" : entry.getValue().toString();
 
-      JsonObject content = JsonObject.fromJson(loaded.content());
-      String currentValue = content.getString(field);
-      if (currentValue == null) {
-        currentValue = "";
+      if (kv) {
+        return extendKv(docId, field, appendValue, maxfieldlength);
+      } else {
+        return extendN1ql(docId, field, appendValue, maxfieldlength);
       }
-
-      String nextValue = currentValue + appendValue;
-      if (maxfieldlength >= 0 && nextValue.length() > maxfieldlength) {
-        nextValue = nextValue.substring(0, (int) maxfieldlength);
-      }
-
-      content.put(field, nextValue);
-      waitForMutationResponse(bucket.async().replace(
-          RawJsonDocument.create(docId, documentExpiry, content.toString()),
-          persistTo,
-          replicateTo
-      ));
-
-      return Status.OK;
     } catch (Exception ex) {
       ex.printStackTrace();
       return Status.ERROR;
     }
+  }
+
+  private Status extendKv(final String docId, final String field, final String appendValue,
+      final long maxfieldlength) {
+    RawJsonDocument loaded = bucket.get(docId, RawJsonDocument.class);
+    if (loaded == null) {
+      return Status.NOT_FOUND;
+    }
+
+    JsonObject content = JsonObject.fromJson(loaded.content());
+    String currentValue = content.getString(field);
+    if (currentValue == null) {
+      currentValue = "";
+    }
+
+    String nextValue = currentValue + appendValue;
+    if (maxfieldlength >= 0 && nextValue.length() > maxfieldlength) {
+      nextValue = nextValue.substring(0, (int) maxfieldlength);
+    }
+
+    content.put(field, nextValue);
+    waitForMutationResponse(bucket.async().replace(
+        RawJsonDocument.create(docId, documentExpiry, content.toString()),
+        persistTo,
+        replicateTo
+    ));
+    return Status.OK;
+  }
+
+  private Status extendN1ql(final String docId, final String field, final String appendValue,
+      final long maxfieldlength) throws Exception {
+    String escapedField = field.replace("`", "``");
+    String quotedField = "`" + escapedField + "`";
+
+    String readQuery = "SELECT " + quotedField + " FROM `" + bucketName + "` USE KEYS [$1]";
+    N1qlQueryResult readResult = bucket.query(N1qlQuery.parameterized(
+        readQuery,
+        JsonArray.from(docId),
+        N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
+    ));
+
+    if (!readResult.parseSuccess() || !readResult.finalSuccess()) {
+      throw new DBException("Error while parsing N1QL Result. Query: " + readQuery
+          + ", Errors: " + readResult.errors());
+    }
+
+    N1qlQueryRow row;
+    try {
+      row = readResult.rows().next();
+    } catch (NoSuchElementException ex) {
+      return Status.NOT_FOUND;
+    }
+
+    JsonObject rowValue = row.value();
+    JsonObject bucketScoped = rowValue.getObject(bucketName);
+    Object existing = bucketScoped != null ? bucketScoped.get(field) : rowValue.get(field);
+    String currentValue = existing == null ? "" : existing.toString();
+
+    String nextValue = currentValue + appendValue;
+    if (maxfieldlength >= 0 && nextValue.length() > maxfieldlength) {
+      nextValue = nextValue.substring(0, (int) maxfieldlength);
+    }
+
+    String updateQuery = "UPDATE `" + bucketName + "` USE KEYS [$1] SET " + quotedField + " = $2";
+    N1qlQueryResult updateResult = bucket.query(N1qlQuery.parameterized(
+        updateQuery,
+        JsonArray.from(docId, nextValue),
+        N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
+    ));
+
+    if (!updateResult.parseSuccess() || !updateResult.finalSuccess()) {
+      throw new DBException("Error while parsing N1QL Result. Query: " + updateQuery
+          + ", Errors: " + updateResult.errors());
+    }
+    return Status.OK;
   }
 
   @Override
@@ -790,11 +863,19 @@ public class Couchbase2Client extends DB {
     StringBuilder sb = new StringBuilder();
     for (Map.Entry<String, ByteIterator> entry : values.entrySet()) {
       String raw = entry.getValue().toString();
-      String escaped = raw.replace("\"", "\\\"").replace("\'", "\\\'");
-      sb.append(entry.getKey()).append("=\"").append(escaped).append("\" ");
+      String escapedField = entry.getKey().replace("`", "``");
+      sb.append("`").append(escapedField).append("`=").append(quoteJsonString(raw)).append(" ");
     }
     String toReturn = sb.toString();
     return toReturn.substring(0, toReturn.length() - 1);
+  }
+
+  private static String quoteJsonString(final String value) {
+    try {
+      return JacksonTransformers.MAPPER.writeValueAsString(value);
+    } catch (Exception e) {
+      return "\"\"";
+    }
   }
 
   /**
