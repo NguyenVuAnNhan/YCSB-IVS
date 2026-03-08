@@ -31,9 +31,8 @@ RESET_BUCKET_BEFORE_RUN="true"
 FLUSH_FAILURE_STRATEGY="offset"
 INSERTION_RETRY_LIMIT="20"
 INSERTION_RETRY_INTERVAL="2"
-N1QL_RETRY_LIMIT="${N1QL_RETRY_LIMIT:-30}"
-N1QL_RETRY_INTERVAL_SEC="${N1QL_RETRY_INTERVAL_SEC:-2}"
-COUCHBASE_SCAN_CONSISTENCY="${COUCHBASE_SCAN_CONSISTENCY:-request_plus}"
+INDEX_READY_TIMEOUT_SEC="${INDEX_READY_TIMEOUT_SEC:-180}"
+INDEX_READY_POLL_INTERVAL_SEC="${INDEX_READY_POLL_INTERVAL_SEC:-2}"
 
 # Define the workload file and the log file
 WORKLOAD_FILE="../workloads/workloada-extend"
@@ -81,6 +80,10 @@ WORKLOAD_BACKUP_FILE=""
 
 log() {
     echo "$1" | tee -a "$LOG_FILE"
+}
+
+log_stderr() {
+    echo "$1" | tee -a "$LOG_FILE" >&2
 }
 
 password_var_hint_for_bucket() {
@@ -297,89 +300,190 @@ n1ql_query_json() {
     curl -s -u "$COUCHBASE_USERNAME:$COUCHBASE_PASSWORD" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       --data-urlencode "statement=$statement" \
-      --data-urlencode "scan_consistency=$COUCHBASE_SCAN_CONSISTENCY" \
+      --data-urlencode "scan_consistency=request_plus" \
       "http://$COUCHBASE_HOST:8093/query/service" || true
 }
 
-n1ql_error_summary() {
+primary_index_name_for_bucket() {
+    local bucket_name="$1"
+    local idx_suffix
+    idx_suffix=$(echo "$bucket_name" | sed 's/[^a-zA-Z0-9_]/_/g')
+    echo "idx_primary_${idx_suffix}"
+}
+
+index_status_json() {
+    curl -s -u "$COUCHBASE_USERNAME:$COUCHBASE_PASSWORD" \
+      "http://$COUCHBASE_HOST:8091/indexStatus" || true
+}
+
+n1ql_is_indexer_rollback_response() {
+    local response="$1"
+    printf '%s' "$response" | jq -e '
+        (.errors // [])
+        | map(select(
+            ((.code // 0) == 5000) or
+            ((.reason.code // 0) == 4350) or
+            ((.msg // "" | ascii_downcase | contains("indexer rollback"))) or
+            ((.reason.message // "" | ascii_downcase | contains("gsi error")))
+        ))
+        | length > 0
+    ' >/dev/null 2>&1
+}
+
+n1ql_first_error_message() {
     local response="$1"
     printf '%s' "$response" | jq -r '
-        [.errors[]? |
-            ((.code // "")|tostring) + " " +
-            (.msg // "") + " " +
-            (.reason.message // "") + " " +
-            (.reason.cause.error // "")
-        ] | join(" | ")
-    ' 2>/dev/null || true
+        (.errors[0].msg // .errors[0].reason.message // .errors[0].reason.cause.error // "unknown n1ql error")
+    ' 2>/dev/null || echo "unknown n1ql error"
 }
 
-n1ql_retry_reason() {
-    local response="$1"
-    local status summary
+wait_for_primary_index_ready_or_die() {
+    local bucket_name="$1"
+    local index_name attempts attempt response state progress stale
 
-    if [ -z "$response" ]; then
-        echo "empty response"
-        return 0
+    index_name=$(primary_index_name_for_bucket "$bucket_name")
+    attempts=$(( (INDEX_READY_TIMEOUT_SEC + INDEX_READY_POLL_INTERVAL_SEC - 1) / INDEX_READY_POLL_INTERVAL_SEC ))
+    if [ "$attempts" -le 0 ]; then
+        attempts=1
     fi
 
-    status=$(printf '%s' "$response" | jq -r '.status // empty' 2>/dev/null || true)
-    if [ -z "$status" ]; then
-        echo "missing status in response"
-        return 0
-    fi
+    for attempt in $(seq 1 "$attempts"); do
+        response=$(index_status_json)
+        state=$(printf '%s' "$response" | jq -r --arg bucket "$bucket_name" --arg idx "$index_name" '
+            (.indexes // [])
+            | map(select((.bucket // "") == $bucket and (((.index // .indexName // "") == $idx) or ((.index // .indexName // "") == "#primary"))))
+            | if length == 0 then "MISSING" else (.[0].status // "UNKNOWN") end
+        ' 2>/dev/null || echo "PARSE_ERROR")
+        progress=$(printf '%s' "$response" | jq -r --arg bucket "$bucket_name" --arg idx "$index_name" '
+            (.indexes // [])
+            | map(select((.bucket // "") == $bucket and (((.index // .indexName // "") == $idx) or ((.index // .indexName // "") == "#primary"))))
+            | if length == 0 then "n/a" else ((.[0].progress // "n/a")|tostring) end
+        ' 2>/dev/null || echo "n/a")
+        stale=$(printf '%s' "$response" | jq -r --arg bucket "$bucket_name" --arg idx "$index_name" '
+            (.indexes // [])
+            | map(select((.bucket // "") == $bucket and (((.index // .indexName // "") == $idx) or ((.index // .indexName // "") == "#primary"))))
+            | if length == 0 then "n/a" else ((.[0].stale // "n/a")|tostring) end
+        ' 2>/dev/null || echo "n/a")
 
-    if printf '%s' "$response" | jq -e '.errors[]? | select((.code // 0) == 5000 or (.reason.code // 0) == 4350)' >/dev/null 2>&1; then
-        echo "gsi/indexer rollback error code"
-        return 0
-    fi
+        if [ "$state" = "Ready" ]; then
+            return
+        fi
 
-    summary=$(n1ql_error_summary "$response")
-    if echo "$summary" | grep -Eiq 'indexer rollback|index rollback|gsi error|temporarily unavailable|service unavailable|connection reset|timeout'; then
-        echo "${summary:-transient query service/indexer failure}"
-        return 0
-    fi
+        if [ "$attempt" -eq 1 ] || [ $((attempt % 5)) -eq 0 ]; then
+            log_stderr "[WARN] Waiting for primary index '$index_name' on bucket '$bucket_name' (state=$state, progress=$progress, stale=$stale, attempt $attempt/$attempts)."
+        fi
+        sleep "$INDEX_READY_POLL_INTERVAL_SEC"
+    done
 
-    return 1
+    log_stderr "[ERROR] Primary index '$index_name' for bucket '$bucket_name' did not become Ready within ${INDEX_READY_TIMEOUT_SEC}s."
+    log_stderr "[ERROR] Last /indexStatus payload: $(index_status_json)"
+    exit 1
 }
 
-n1ql_query_or_die() {
+wait_for_bucket_query_ready_or_die() {
+    local bucket_name="$1"
+    local context="$2"
+    local probe_stmt probe_response probe_status attempts attempt err_msg
+
+    probe_stmt="SELECT RAW META().id FROM \`$bucket_name\` LIMIT 1;"
+    attempts=$(( (INDEX_READY_TIMEOUT_SEC + INDEX_READY_POLL_INTERVAL_SEC - 1) / INDEX_READY_POLL_INTERVAL_SEC ))
+    if [ "$attempts" -le 0 ]; then
+        attempts=1
+    fi
+
+    for attempt in $(seq 1 "$attempts"); do
+        wait_for_primary_index_ready_or_die "$bucket_name"
+
+        probe_response=$(n1ql_query_json "$probe_stmt")
+        probe_status=$(printf '%s' "$probe_response" | jq -r '.status // empty' 2>/dev/null || true)
+        if [ "$probe_status" = "success" ]; then
+            return
+        fi
+
+        if n1ql_is_indexer_rollback_response "$probe_response"; then
+            if [ "$attempt" -eq 1 ] || [ $((attempt % 5)) -eq 0 ]; then
+                err_msg=$(n1ql_first_error_message "$probe_response")
+                log_stderr "[WARN] Waiting for active index/query path on bucket '$bucket_name' before $context (attempt $attempt/$attempts): $err_msg"
+            fi
+            sleep "$INDEX_READY_POLL_INTERVAL_SEC"
+            continue
+        fi
+
+        log_stderr "[ERROR] Query readiness probe failed during: $context"
+        log_stderr "[ERROR] Probe statement: $probe_stmt"
+        log_stderr "[ERROR] Probe response: $probe_response"
+        exit 1
+    done
+
+    log_stderr "[ERROR] Timed out waiting for active index/query path on bucket '$bucket_name' before $context."
+    exit 1
+}
+
+n1ql_query_with_active_index_or_die() {
     local statement="$1"
     local context="$2"
-    local response status attempt retry_reason
+    local bucket_name="$3"
+    local response status attempts attempt err_msg
 
-    for attempt in $(seq 1 "$N1QL_RETRY_LIMIT"); do
+    attempts=$(( (INDEX_READY_TIMEOUT_SEC + INDEX_READY_POLL_INTERVAL_SEC - 1) / INDEX_READY_POLL_INTERVAL_SEC ))
+    if [ "$attempts" -le 0 ]; then
+        attempts=1
+    fi
+
+    for attempt in $(seq 1 "$attempts"); do
+        wait_for_bucket_query_ready_or_die "$bucket_name" "$context"
         response=$(n1ql_query_json "$statement")
         status=$(printf '%s' "$response" | jq -r '.status // empty' 2>/dev/null || true)
-
         if [ "$status" = "success" ]; then
             printf '%s' "$response"
             return
         fi
 
-        retry_reason=""
-        if retry_reason=$(n1ql_retry_reason "$response"); then
-            if [ "$attempt" -lt "$N1QL_RETRY_LIMIT" ]; then
-                log "[WARN] N1QL transient failure during: $context (attempt $attempt/$N1QL_RETRY_LIMIT). Retrying in ${N1QL_RETRY_INTERVAL_SEC}s. Reason: $retry_reason"
-                sleep "$N1QL_RETRY_INTERVAL_SEC"
-                continue
+        if n1ql_is_indexer_rollback_response "$response"; then
+            if [ "$attempt" -eq 1 ] || [ $((attempt % 5)) -eq 0 ]; then
+                err_msg=$(n1ql_first_error_message "$response")
+                log_stderr "[WARN] Active-index-gated query still hit index rollback during: $context (attempt $attempt/$attempts): $err_msg"
             fi
-            log "[ERROR] N1QL query failed during: $context after $N1QL_RETRY_LIMIT attempts (last reason: $retry_reason)."
-        else
-            log "[ERROR] N1QL query failed during: $context"
+            sleep "$INDEX_READY_POLL_INTERVAL_SEC"
+            continue
         fi
 
+        log_stderr "[ERROR] N1QL query failed during: $context"
+        log_stderr "[ERROR] Statement: $statement"
+        log_stderr "[ERROR] Response: $response"
+        exit 1
+    done
+
+    log_stderr "[ERROR] N1QL query failed during: $context after waiting ${INDEX_READY_TIMEOUT_SEC}s for active index/query path."
+    log_stderr "[ERROR] Statement: $statement"
+    log_stderr "[ERROR] Last response: $response"
+    exit 1
+}
+
+n1ql_query_or_die() {
+    local statement="$1"
+    local context="$2"
+    local response status
+
+    response=$(n1ql_query_json "$statement")
+    status=$(printf '%s' "$response" | jq -r '.status // empty' 2>/dev/null || true)
+
+    if [ -z "$status" ] || [ "$status" != "success" ]; then
+        log "[ERROR] N1QL query failed during: $context"
         log "[ERROR] Statement: $statement"
         log "[ERROR] Response: $response"
         exit 1
-    done
+    fi
+
+    printf '%s' "$response"
 }
 
 ensure_primary_index() {
     local bucket_name="$1"
-    local idx_suffix
-    idx_suffix=$(echo "$bucket_name" | sed 's/[^a-zA-Z0-9_]/_/g')
-    local idx_name="idx_primary_${idx_suffix}"
+    local idx_name
+    idx_name=$(primary_index_name_for_bucket "$bucket_name")
     n1ql_query_or_die "CREATE PRIMARY INDEX IF NOT EXISTS \`$idx_name\` ON \`$bucket_name\`;" "create primary index on $bucket_name" >/dev/null
+    wait_for_primary_index_ready_or_die "$bucket_name"
 }
 
 ensure_query_indexes() {
@@ -654,8 +758,15 @@ dump_key_sizes() {
 
     expr=$(size_expression | tr '\n' ' ')
     echo "ycsb_key,size" > "$out_file"
-    response=$(n1ql_query_or_die "SELECT RAW [META().id, ($expr)] FROM \`$bucket_name\`;" "dump key sizes from $bucket_name")
-    printf '%s' "$response" | jq -r '.results[] | "\(.[0]),\(.[1] // 0)"' >> "$out_file"
+    response=$(n1ql_query_with_active_index_or_die \
+        "SELECT RAW [META().id, ($expr)] FROM \`$bucket_name\`;" \
+        "dump key sizes from $bucket_name" \
+        "$bucket_name")
+    if ! printf '%s' "$response" | jq -r '.results[] | "\(.[0]),\(.[1] // 0)"' >> "$out_file" 2>/dev/null; then
+        log_stderr "[ERROR] Failed to parse N1QL JSON during: dump key sizes from $bucket_name"
+        log_stderr "[ERROR] Raw response: $response"
+        exit 1
+    fi
 }
 
 get_total_size() {
@@ -663,8 +774,15 @@ get_total_size() {
     local expr response total
 
     expr=$(size_expression | tr '\n' ' ')
-    response=$(n1ql_query_or_die "SELECT RAW SUM(($expr)) FROM \`$bucket_name\`;" "compute total size from $bucket_name")
-    total=$(printf '%s' "$response" | jq -r '.results[0] // 0')
+    response=$(n1ql_query_with_active_index_or_die \
+        "SELECT RAW SUM(($expr)) FROM \`$bucket_name\`;" \
+        "compute total size from $bucket_name" \
+        "$bucket_name")
+    if ! total=$(printf '%s' "$response" | jq -r '.results[0] // 0' 2>/dev/null); then
+        log_stderr "[ERROR] Failed to parse N1QL JSON during: compute total size from $bucket_name"
+        log_stderr "[ERROR] Raw response: $response"
+        exit 1
+    fi
     echo "$total"
 }
 
