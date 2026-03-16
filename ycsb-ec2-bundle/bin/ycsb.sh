@@ -114,9 +114,9 @@ if [ "$BINDING_NAME" = "basic" ] ; then
   BINDING_DIR=core
 fi
 
-# Override binding dir for jdbc-array binding
-if [ "$BINDING_NAME" = "jdbc-array" ] ; then
-  BINDING_DIR="jdbc-array"
+# Override binding dir for JDBC bindings whose names include multiple dashes
+if [ "$BINDING_NAME" = "jdbc-array" ] || [ "$BINDING_NAME" = "jdbc-array-json" ] ; then
+  BINDING_DIR="$BINDING_NAME"
 fi
 
 # For Cygwin, ensure paths are in UNIX format before anything is touched
@@ -262,4 +262,3 @@ echo "$JAVA_HOME/bin/java $JAVA_OPTS -classpath $CLASSPATH $YCSB_CLASS $YCSB_COM
 # here.  So, the shellcheck error is disabled for this line.
 # shellcheck disable=SC2086
 "$JAVA_HOME/bin/java" $JAVA_OPTS -classpath "$CLASSPATH" $YCSB_CLASS $YCSB_COMMAND -db $BINDING_CLASS $YCSB_ARGS
-
