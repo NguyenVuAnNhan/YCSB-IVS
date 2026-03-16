@@ -75,7 +75,7 @@ readrequestdistribution_postextend="uniform"
 updaterequestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="1000"
+extendoperationcount="10000"
 WORKLOAD_BACKUP_FILE=""
 
 log() {
@@ -125,7 +125,7 @@ backup_workload_file() {
 ensure_core_dependencies() {
     if [ ! -d "$YCSB_HOME/core/target/dependency" ] || [ ! -d "$YCSB_HOME/couchbase2/target/dependency" ]; then
         log "[WARN] core/couchbase2 dependencies missing; building with -Psource-run..."
-        mvn -Psource-run -pl site.ycsb:core,site.ycsb:couchbase2-binding -am package -DskipTests -Dcheckstyle.skip=true
+        (cd "$YCSB_HOME" && mvn -Psource-run -pl core,couchbase2 -am package -DskipTests -Dcheckstyle.skip=true)
     fi
 }
 
