@@ -28,14 +28,21 @@ JDBC_PROPERTIES="../jdbc-binding/conf/postgres.properties"
 DB_USERNAME="ycsb"
 DB_PWD="USyd2025"
 
+# Change naming parameters here
+TYPE="postgresql_arrayjson"
+DIST="uniform" # "uniform" OR "zipfian"
+SCALE="heavy" # "heavy" OR "light"
+WORK="spreadrun" # e.g. "mixed", "pure", or "spreadrun"
+RUN="1"
+
 # Define the workload file and the log file
 WORKLOAD_FILE="../workloads/workloada-extend"
-LOG_FILE="./ycsb_postgresql_array_results.log"
-OUTPUT_CSV="../analysis/postgresql_array_output.csv"
+LOG_FILE="./ycsb_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_results.log"
+OUTPUT_CSV="../analysis/${TYPE}_output.csv"
 
 # Define input and output filenames
-INPUT_FILE="../analysis/postgresql_array_output.csv"
-OUTPUT_FILE="../analysis/Data/Baseline_data/postgresql_array_run1_spreadrun_heavy.csv"
+INPUT_FILE="../analysis/${TYPE}_output.csv"
+OUTPUT_FILE="../analysis/Data/Baseline_data/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}.csv"
 
 # Extend phase experiment parameters
 extendproportion_extend="0"

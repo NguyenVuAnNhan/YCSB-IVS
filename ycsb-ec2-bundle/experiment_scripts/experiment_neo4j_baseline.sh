@@ -226,14 +226,21 @@ DB_URL="bolt://localhost:7687"
 DB_USERNAME="neo4j"
 DB_PWD="password"
 
+# Change naming parameters here
+TYPE="neo4j"
+DIST="uniform" # "uniform" OR "zipfian"
+SCALE="light" # "heavy" OR "light"
+WORK="spreadrun" # e.g. "mixed", "pure", or "spreadrun"
+RUN="1"
+
 # Define the workload file and the log file
 WORKLOAD_FILE="../workloads/workloada-extend"
-LOG_FILE="./ycsb_neo4j_results.log"
-OUTPUT_CSV="../analysis/neo4j_output.csv"
+LOG_FILE="./ycsb_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_results.log"
+OUTPUT_CSV="../analysis/${TYPE}_output.csv"
 
 # Define input and output filenames  
-INPUT_FILE="../analysis/neo4j_output.csv"
-OUTPUT_FILE="../analysis/Data/Baseline_data/neo4j_run1_spreadrun_light.csv"
+INPUT_FILE="../analysis/${TYPE}_output.csv"
+OUTPUT_FILE="../analysis/Data/Baseline_data/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}.csv"
 
 # Extend phase experiment parameters
 extendproportion_extend="0"

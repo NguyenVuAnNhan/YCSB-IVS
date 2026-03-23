@@ -412,22 +412,29 @@ MAIN_NEO4J_URI="neo4j://localhost:${MAIN_BOLT_PORT}"
 BACKUP_NEO4J_URI="neo4j://localhost:${BACKUP_BOLT_PORT}"
 UNCHANGE_NEO4J_URI="neo4j://localhost:${UNCHANGE_BOLT_PORT}"
 
+# Change naming parameters here
+TYPE="neo4j"
+DIST="uniform" # "uniform" OR "zipfian"
+SCALE="light" # "heavy" OR "light"
+WORK="mixed" # e.g. "mixed", "pure", or "spreadrun"
+RUN="1"
+
 # Define the workload file and the log file
 WORKLOAD_FILE="../workloads/workloada-extend"
-LOG_FILE="./ycsb_neo4j_results.log"
-QUERY_PLAN_LOG="./neo4j_query_plan.log"
+LOG_FILE="./ycsb_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_results.log"
+QUERY_PLAN_LOG="./${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_query_plan.log"
 APOC_BACKUP_PATH="tmp/ycsb_neo4j_backup.graphml"
-DATASET_LOG="./dataset.log"
-OUTPUT_CSV="../analysis/neo4j_output.csv"
+DATASET_LOG="./${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_dataset.log"
+OUTPUT_CSV="../analysis/${TYPE}_output.csv"
 
 # Define input and output filenames
-INPUT_FILE="../analysis/neo4j_output.csv"
-OUTPUT_FILE="../analysis/Data/Workload_data/neo4j_run1_uniform_light_mixed.csv"
+INPUT_FILE="../analysis/${TYPE}_output.csv"
+OUTPUT_FILE="../analysis/Data/Workload_data/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}.csv"
 
 # Key size gathering
-KEY_SIZE_LOG="key_sizes.csv"
-KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_neo4j_run1_uniform_light_before_mixed.csv"
-KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_neo4j_run1_uniform_light_after_mixed.csv"
+KEY_SIZE_LOG="key_sizes_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}.csv"
+KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_${TYPE}_run${RUN}_${DIST}_${SCALE}_before_${WORK}.csv"
+KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_${TYPE}_run${RUN}_${DIST}_${SCALE}_after_${WORK}.csv"
 HISTOGRAM_FILE="histogram.txt"
 
 # Extend phase experiment parameters

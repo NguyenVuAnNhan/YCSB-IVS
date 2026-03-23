@@ -8,19 +8,26 @@ MONGOSHELL="/usr/bin/mongosh"
 MONGODUMP="mongodump"
 MONGORESTORE="mongorestore"
 
+# Change naming parameters here
+TYPE="mongodb"
+DIST="uniform" # "uniform" OR "zipfian"
+SCALE="light" # "heavy" OR "light"
+WORK="mixed" # e.g. "mixed", "pure", or "spreadrun"
+RUN="1"
+
 # Define the workload file and the log file
 WORKLOAD_FILE="../workloads/workloada-extend"
-LOG_FILE="./ycsb_results.log"
-OUTPUT_CSV="../analysis/output.csv"
+LOG_FILE="./ycsb_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_results.log"
+OUTPUT_CSV="../analysis/${TYPE}_output.csv"
 
 # Define input and output filenames
-INPUT_FILE="../analysis/output.csv"
-OUTPUT_FILE="../analysis/Data/Workload_data/mongodb_run1_uniform_light.csv"
+INPUT_FILE="../analysis/${TYPE}_output.csv"
+OUTPUT_FILE="../analysis/Data/Workload_data/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}.csv"
 
 # Key size gathering
-KEY_SIZE_LOG="key_sizes.csv"
-KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_mongodb_run1_uniform_light_before.csv"
-KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_mongodb_run1_uniform_light_after.csv"
+KEY_SIZE_LOG="key_sizes_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}.csv"
+KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_${TYPE}_run${RUN}_${DIST}_${SCALE}_before_${WORK}.csv"
+KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_${TYPE}_run${RUN}_${DIST}_${SCALE}_after_${WORK}.csv"
 HISTOGRAM_FILE="histogram.txt"
 
 # DB names

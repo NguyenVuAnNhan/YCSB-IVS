@@ -13,14 +13,21 @@ JDBC_PROPERTIES="jdbc-binding/conf/db.properties"
 DB_USERNAME="ycsb_user"
 DB_PWD="password"
 
+# Change naming parameters here
+TYPE="innodb"
+DIST="uniform" # "uniform" OR "zipfian"
+SCALE="light" # "heavy" OR "light"
+WORK="spreadrun" # e.g. "mixed", "pure", or "spreadrun"
+RUN="1"
+
 # Define the workload file and the log file
 WORKLOAD_FILE="../workloads/workloada-extend"
-LOG_FILE="./ycsb_results.log"
-OUTPUT_CSV="../analysis/output.csv"
+LOG_FILE="./ycsb_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_results.log"
+OUTPUT_CSV="../analysis/${TYPE}_output.csv"
 
 # Define input and output filenames
-INPUT_FILE="../analysis/output.csv"
-OUTPUT_FILE="../analysis/Data/Baseline_data/innodb_run1_spreadrun_light.csv"
+INPUT_FILE="../analysis/${TYPE}_output.csv"
+OUTPUT_FILE="../analysis/Data/Baseline_data/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}.csv"
 
 # Extend phase experiment parameters
 extendproportion_extend="0"
