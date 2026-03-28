@@ -242,7 +242,7 @@ extendoperationcount="10000"
 ######Helper functions######
 
 # Generate stats_header from binding_field_names
-stats_header=$(IFS=','; echo "${binding_field_names[*]}")
+stats_header="CPU,Memory,$(IFS=','; echo "${binding_field_names[*]}")"
 
 # Constant headers (not database-specific)
 common_header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation"
@@ -341,7 +341,7 @@ write_result() {
         )
 
         # Populate binding_fields from database-specific metrics using binding_field_names
-        binding_fields=()
+        binding_fields=("$cpu" "$memory")
         for field_name in "${binding_field_names[@]}"; do
             # Use indirect variable reference to get the value
             binding_fields+=("${!field_name}")

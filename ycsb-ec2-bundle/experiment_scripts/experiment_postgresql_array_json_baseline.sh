@@ -165,7 +165,7 @@ run_ycsb_run() {
 }
 
 # Generate stats_header from binding_field_names
-stats_header=$(IFS=','; echo "${binding_field_names[*]}")
+stats_header="CPU,Memory,$(IFS=','; echo "${binding_field_names[*]}")"
 
 # Constant headers (not database-specific)
 common_header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation"
@@ -240,7 +240,7 @@ write_result() {
             "$operation"
         )
 
-        binding_fields=()
+        binding_fields=("$cpu" "$memory")
         for field_name in "${binding_field_names[@]}"; do
             binding_fields+=("${!field_name}")
         done
