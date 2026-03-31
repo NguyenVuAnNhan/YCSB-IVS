@@ -76,7 +76,7 @@ readrequestdistribution_postextend="uniform"
 updaterequestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="10000"
+extendoperationcount="100000"
 
 # Function to log and print messages
 log() {
@@ -105,25 +105,8 @@ run_with_metrics() {
         phase="$phase" \
         epoch="$epoch" \
         metrics_file="$metrics_file" \
-        bash -c '
-    while true; do
-        pids=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d postgres -t -A -c \
-            "SELECT pid FROM pg_stat_activity WHERE datname = '\''$db_name'\'';" \
-            | paste -sd "," -)
-
-        if [ -z "$pids" ]; then
-            cpu="NULL"
-            mem_kb="NULL"
-        else
-            cpu=$(ps -p "$pids" -o %cpu= 2>/dev/null | awk "{sum += \$1} END {print sum}")
-            mem_kb=$(ps -p "$pids" -o rss= 2>/dev/null | awk "{sum += \$1} END {print sum}")
-        fi
-
-        ts=$(date +%s)
-        echo "$phase,$epoch,$ts,$cpu,$mem_kb" >> "$metrics_file"
-        sleep 1
-    done
-    ' &
+        INTERVAL=1 \
+        ./watcher.sh &
     watcher_pid=$!
 
     trap "kill -TERM -$watcher_pid 2>/dev/null" EXIT INT TERM
@@ -417,8 +400,8 @@ log "Reference-load verification - TotalSize:$total_size_reference_load Expected
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
 # Experiment parameters
-for epoch in $(seq 1 3); do
-    for run in $(seq 1 3); do
+for epoch in $(seq 1 1); do
+    for run in $(seq 1 1); do
 
         iteration=$((10*($epoch-1)+$run))
         
