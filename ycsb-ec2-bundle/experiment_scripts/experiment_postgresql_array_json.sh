@@ -83,6 +83,11 @@ log() {
     echo "$1" | tee -a $LOG_FILE
 }
 
+collect_cpu_memory_metrics() {
+    cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum + 0}')
+    memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum + 0}')
+}
+
 # CPU and Memory watcher
 run_with_metrics() {
     set +e
@@ -169,9 +174,9 @@ write_result() {
             | awk '{ORS=","; print}' \
             | sed 's/,$//')
         if [ -n "$dynamic_cols" ]; then
-            header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec),$dynamic_cols"
+            header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,CPU,Memory,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec),$dynamic_cols"
         else
-            header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec)"
+            header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,CPU,Memory,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec)"
         fi
         echo "$header" > "$OUTPUT_FILE"
     fi
@@ -197,6 +202,8 @@ write_result() {
     scanproportion=${scanproportion:-""}
     insertproportion=${insertproportion:-""}
     extendproportion=${extendproportion:-""}
+    cpu=${cpu:-""}
+    memory=${memory:-""}
 
     # Extract throughput from overall output
     run_specific=()
@@ -231,13 +238,13 @@ write_result() {
 
         # Build CSV row
         if [ $k -eq 1 ]; then
-            values_1="$r,$phase,$recordcount,$readallfields,$op_requestdistribution,$operation,$blks_read,$blks_hit,$tup_returned,$tup_fetched,$tup_inserted,$tup_updated,$tup_deleted,$deadlocks,$temp_files,$temp_bytes,$checkpoints_timed,$checkpoints_req,$buffers_checkpoint,$buffers_clean,$buffers_backend,$buffers_alloc,$checkpoint_write_time,$checkpoint_sync_time,$wal_bytes,$wal_records,$wal_fpi,$wal_buffers_full,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
+            values_1="$r,$phase,$recordcount,$readallfields,$op_requestdistribution,$operation,$cpu,$memory,$blks_read,$blks_hit,$tup_returned,$tup_fetched,$tup_inserted,$tup_updated,$tup_deleted,$deadlocks,$temp_files,$temp_bytes,$checkpoints_timed,$checkpoints_req,$buffers_checkpoint,$buffers_clean,$buffers_backend,$buffers_alloc,$checkpoint_write_time,$checkpoint_sync_time,$wal_bytes,$wal_records,$wal_fpi,$wal_buffers_full,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
             k=$((k + 1))
             prev_operation="$operation"
         elif [ $p -eq 1 ] && [ "$prev_operation" == "$operation" ]; then
             values_1="$values_1,$third_value"
         elif [ $p -eq 1 ] && [ "$prev_operation" != "$operation" ]; then
-            values_2="$r,$phase,$recordcount,$readallfields,$op_requestdistribution,$operation,$blks_read,$blks_hit,$tup_returned,$tup_fetched,$tup_inserted,$tup_updated,$tup_deleted,$deadlocks,$temp_files,$temp_bytes,$checkpoints_timed,$checkpoints_req,$buffers_checkpoint,$buffers_clean,$buffers_backend,$buffers_alloc,$checkpoint_write_time,$checkpoint_sync_time,$wal_bytes,$wal_records,$wal_fpi,$wal_buffers_full,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
+            values_2="$r,$phase,$recordcount,$readallfields,$op_requestdistribution,$operation,$cpu,$memory,$blks_read,$blks_hit,$tup_returned,$tup_fetched,$tup_inserted,$tup_updated,$tup_deleted,$deadlocks,$temp_files,$temp_bytes,$checkpoints_timed,$checkpoints_req,$buffers_checkpoint,$buffers_clean,$buffers_backend,$buffers_alloc,$checkpoint_write_time,$checkpoint_sync_time,$wal_bytes,$wal_records,$wal_fpi,$wal_buffers_full,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
             p=$((p + 1))
             prev_operation="$operation"
         else
@@ -378,7 +385,8 @@ run_with_metrics "$DB_NAME" "$phase" "$run" "$OUTPUT_CSV" \
     -p db.url="$DB_URL" \
     -p db.user="$DB_USERNAME" \
     -p db.passwd="$DB_PWD"
-
+cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
+memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
 total_size_initial_load=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," -c "SELECT SUM(COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0)) FROM usertable;")
 log "Initial-load verification - TotalSize:$total_size_initial_load ExpectedFieldLength:$fieldlengthoriginal"
 collect_postgres_metrics $DB_NAME
@@ -449,6 +457,7 @@ for epoch in $(seq 1 1); do
             log "WARNING: $extend_failed_count EXTEND operations failed during extend phase"
         fi
         
+        collect_cpu_memory_metrics
         collect_postgres_metrics $DB_NAME
         write_result "FALSE"
 
@@ -581,6 +590,7 @@ for epoch in $(seq 1 1); do
         -p db.passwd="$DB_PWD" \
         -p fieldlengthhistogram="$HISTOGRAM_FILE"
         
+        collect_cpu_memory_metrics
         collect_postgres_metrics $DB_NAME
         write_result "FALSE"
 
@@ -619,6 +629,7 @@ for epoch in $(seq 1 1); do
         -p db.passwd="$DB_PWD" \
         -p fieldlengthhistogram="$HISTOGRAM_FILE"
         
+        collect_cpu_memory_metrics
         collect_postgres_metrics $UNCHANGE_DB_NAME
         write_result "FALSE"
 
@@ -665,6 +676,7 @@ for epoch in $(seq 1 1); do
                 -p db.passwd="$DB_PWD" \
                 -p fieldlengthhistogram="$HISTOGRAM_FILE"
 
+            collect_cpu_memory_metrics
             collect_postgres_metrics $BACKUP_DB_NAME
             rm -rf "$BACKUP_FILE"
             write_result "FALSE"
@@ -771,6 +783,7 @@ for epoch in $(seq 1 1); do
                 -p db.user="$DB_USERNAME" \
                 -p db.passwd="$DB_PWD"
             
+            collect_cpu_memory_metrics
             collect_postgres_metrics $BACKUP_DB_NAME
             write_result "FALSE"
         fi
