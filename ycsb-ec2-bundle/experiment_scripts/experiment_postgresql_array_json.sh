@@ -83,6 +83,64 @@ log() {
     echo "$1" | tee -a $LOG_FILE
 }
 
+# CPU and Memory watcher
+run_with_metrics() {
+    set +e
+    local db_name=$1
+    local phase=$2
+    local epoch=$3
+    local output_csv=$4
+
+    shift 4
+
+    metrics_file="../analysis/${db_name}_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_${phase}.metrics"
+
+    echo "Starting metrics collection for $db_name"
+
+    # Start watcher
+    setsid env \
+        DB_PWD="$DB_PWD" \
+        DB_USERNAME="$DB_USERNAME" \
+        db_name="$db_name" \
+        phase="$phase" \
+        epoch="$epoch" \
+        metrics_file="$metrics_file" \
+        bash -c '
+    while true; do
+        pids=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d postgres -t -A -c \
+            "SELECT pid FROM pg_stat_activity WHERE datname = '\''$db_name'\'';" \
+            | paste -sd "," -)
+
+        if [ -z "$pids" ]; then
+            cpu="NULL"
+            mem_kb="NULL"
+        else
+            cpu=$(ps -p "$pids" -o %cpu= 2>/dev/null | awk "{sum += \$1} END {print sum}")
+            mem_kb=$(ps -p "$pids" -o rss= 2>/dev/null | awk "{sum += \$1} END {print sum}")
+        fi
+
+        ts=$(date +%s)
+        echo "$phase,$epoch,$ts,$cpu,$mem_kb" >> "$metrics_file"
+        sleep 1
+    done
+    ' &
+    watcher_pid=$!
+
+    trap "kill -TERM -$watcher_pid 2>/dev/null" EXIT INT TERM
+
+    "$@" > "$output_csv"
+    status=$?
+
+    # Stop watcher
+    kill -TERM -$watcher_pid 2>/dev/null
+    wait $watcher_pid 2>/dev/null
+
+    trap - EXIT INT TERM
+
+    echo "Finished $db_name phase=$phase epoch=$epoch (exit=$status)"
+    set -e
+}
+
 # Initialize PostgreSQL database
 initialize_database() {
     local db_name="$1"
@@ -128,9 +186,9 @@ write_result() {
             | awk '{ORS=","; print}' \
             | sed 's/,$//')
         if [ -n "$dynamic_cols" ]; then
-            header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,CPU,Memory,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec),$dynamic_cols"
+            header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec),$dynamic_cols"
         else
-            header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,CPU,Memory,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec)"
+            header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes,checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time,wal_bytes,wal_records,wal_fpi,wal_buffers_full,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec)"
         fi
         echo "$header" > "$OUTPUT_FILE"
     fi
@@ -190,13 +248,13 @@ write_result() {
 
         # Build CSV row
         if [ $k -eq 1 ]; then
-            values_1="$r,$phase,$recordcount,$readallfields,$op_requestdistribution,$operation,$cpu,$memory,$blks_read,$blks_hit,$tup_returned,$tup_fetched,$tup_inserted,$tup_updated,$tup_deleted,$deadlocks,$temp_files,$temp_bytes,$checkpoints_timed,$checkpoints_req,$buffers_checkpoint,$buffers_clean,$buffers_backend,$buffers_alloc,$checkpoint_write_time,$checkpoint_sync_time,$wal_bytes,$wal_records,$wal_fpi,$wal_buffers_full,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
+            values_1="$r,$phase,$recordcount,$readallfields,$op_requestdistribution,$operation,$blks_read,$blks_hit,$tup_returned,$tup_fetched,$tup_inserted,$tup_updated,$tup_deleted,$deadlocks,$temp_files,$temp_bytes,$checkpoints_timed,$checkpoints_req,$buffers_checkpoint,$buffers_clean,$buffers_backend,$buffers_alloc,$checkpoint_write_time,$checkpoint_sync_time,$wal_bytes,$wal_records,$wal_fpi,$wal_buffers_full,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
             k=$((k + 1))
             prev_operation="$operation"
         elif [ $p -eq 1 ] && [ "$prev_operation" == "$operation" ]; then
             values_1="$values_1,$third_value"
         elif [ $p -eq 1 ] && [ "$prev_operation" != "$operation" ]; then
-            values_2="$r,$phase,$recordcount,$readallfields,$op_requestdistribution,$operation,$cpu,$memory,$blks_read,$blks_hit,$tup_returned,$tup_fetched,$tup_inserted,$tup_updated,$tup_deleted,$deadlocks,$temp_files,$temp_bytes,$checkpoints_timed,$checkpoints_req,$buffers_checkpoint,$buffers_clean,$buffers_backend,$buffers_alloc,$checkpoint_write_time,$checkpoint_sync_time,$wal_bytes,$wal_records,$wal_fpi,$wal_buffers_full,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
+            values_2="$r,$phase,$recordcount,$readallfields,$op_requestdistribution,$operation,$blks_read,$blks_hit,$tup_returned,$tup_fetched,$tup_inserted,$tup_updated,$tup_deleted,$deadlocks,$temp_files,$temp_bytes,$checkpoints_timed,$checkpoints_req,$buffers_checkpoint,$buffers_clean,$buffers_backend,$buffers_alloc,$checkpoint_write_time,$checkpoint_sync_time,$wal_bytes,$wal_records,$wal_fpi,$wal_buffers_full,$readproportion,$updateproportion,$scanproportion,$insertproportion,$extendproportion,${run_specific[0]},${run_specific[1]},$third_value"
             p=$((p + 1))
             prev_operation="$operation"
         else
@@ -330,16 +388,28 @@ scanproportion=${scanproportion:-""}
 insertproportion=${insertproportion:-""}
 extendproportion=${extendproportion:-""}
 
-$YCSB load jdbc-array-json -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
+run_with_metrics "$DB_NAME" "$phase" "$run" "$OUTPUT_CSV" \
+    $YCSB load jdbc-array-json -s \
+    -P $WORKLOAD_FILE \
+    -P $JDBC_PROPERTIES \
+    -p db.url="$DB_URL" \
+    -p db.user="$DB_USERNAME" \
+    -p db.passwd="$DB_PWD"
+
 total_size_initial_load=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," -c "SELECT SUM(COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0)) FROM usertable;")
 log "Initial-load verification - TotalSize:$total_size_initial_load ExpectedFieldLength:$fieldlengthoriginal"
-cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
-memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
 collect_postgres_metrics $DB_NAME
 write_result "TRUE"
 
 # Load unchange value size (reference) DB
-$YCSB load jdbc-array-json -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$UNCHANGE_DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
+run_with_metrics "$UNCHANGE_DB_NAME" "$phase" "$run" "$OUTPUT_CSV" \
+    $YCSB load jdbc-array-json -s \
+    -P $WORKLOAD_FILE \
+    -P $JDBC_PROPERTIES \
+    -p db.url="$UNCHANGE_DB_URL" \
+    -p db.user="$DB_USERNAME" \
+    -p db.passwd="$DB_PWD"
+
 total_size_reference_load=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" -At -F"," -c "SELECT SUM(COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0)) FROM usertable;")
 log "Reference-load verification - TotalSize:$total_size_reference_load ExpectedFieldLength:$fieldlengthoriginal"
 
@@ -349,6 +419,8 @@ original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=
 # Experiment parameters
 for epoch in $(seq 1 3); do
     for run in $(seq 1 3); do
+
+        iteration=$((10*($epoch-1)+$run))
         
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
@@ -379,7 +451,14 @@ for epoch in $(seq 1 3); do
         log "=== Executing the extend phase with extendproportion=1 and other proportions=0 ==="
         phase="extend"
         # Capture both stdout and stderr to capture status messages
-        $YCSB run jdbc-array-json -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE" > $OUTPUT_CSV 2>&1
+        run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
+            $YCSB run jdbc-array-json -s \
+            -P $WORKLOAD_FILE \
+            -P $JDBC_PROPERTIES \
+            -p db.url="$DB_URL" \
+            -p db.user="$DB_USERNAME" \
+            -p db.passwd="$DB_PWD" \
+            -p fieldlengthhistogram="$HISTOGRAM_FILE"
         
         # Extract extend failure count from YCSB output (status messages are in the output)
         extend_failed_count=$(grep -oP 'EXTEND-FAILED: Count=\K\d+' "$OUTPUT_CSV" | head -1 || echo "0")
@@ -387,8 +466,6 @@ for epoch in $(seq 1 3); do
             log "WARNING: $extend_failed_count EXTEND operations failed during extend phase"
         fi
         
-        cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
-        memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
         collect_postgres_metrics $DB_NAME
         write_result "FALSE"
 
@@ -512,9 +589,15 @@ for epoch in $(seq 1 3); do
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
         phase="run"
-        $YCSB run jdbc-array-json -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE" > $OUTPUT_CSV
-        cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
-        memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+        run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
+        $YCSB run jdbc-array-json -s \
+        -P $WORKLOAD_FILE \
+        -P $JDBC_PROPERTIES \
+        -p db.url="$DB_URL" \
+        -p db.user="$DB_USERNAME" \
+        -p db.passwd="$DB_PWD" \
+        -p fieldlengthhistogram="$HISTOGRAM_FILE"
+        
         collect_postgres_metrics $DB_NAME
         write_result "FALSE"
 
@@ -544,9 +627,15 @@ for epoch in $(seq 1 3); do
 
         # Reference workload with unchanging value sizes
         phase="reference"
-        $YCSB run jdbc-array-json -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$UNCHANGE_DB_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE"  > $OUTPUT_CSV
-        cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
-        memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+        run_with_metrics "$UNCHANGE_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
+        $YCSB run jdbc-array-json -s \
+        -P $WORKLOAD_FILE \
+        -P $JDBC_PROPERTIES \
+        -p db.url="$UNCHANGE_DB_URL" \
+        -p db.user="$DB_USERNAME" \
+        -p db.passwd="$DB_PWD" \
+        -p fieldlengthhistogram="$HISTOGRAM_FILE"
+        
         collect_postgres_metrics $UNCHANGE_DB_NAME
         write_result "FALSE"
 
@@ -584,9 +673,15 @@ for epoch in $(seq 1 3); do
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -f "$BACKUP_FILE" > /dev/null 2>&1 || true
             log "Backing up the database finished"
 
-            $YCSB run jdbc-array-json -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" -p fieldlengthhistogram="$HISTOGRAM_FILE" > $OUTPUT_CSV
-            cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
-            memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+            run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
+                $YCSB run jdbc-array-json -s \
+                -P $WORKLOAD_FILE \
+                -P $JDBC_PROPERTIES \
+                -p db.url="$BACKUP_URL" \
+                -p db.user="$DB_USERNAME" \
+                -p db.passwd="$DB_PWD" \
+                -p fieldlengthhistogram="$HISTOGRAM_FILE"
+
             collect_postgres_metrics $BACKUP_DB_NAME
             rm -rf "$BACKUP_FILE"
             write_result "FALSE"
@@ -613,7 +708,6 @@ for epoch in $(seq 1 3); do
             >> "$KEY_SIZE_LOG"
             
             # Check if the output file exists, if not, create it with headers
-            iteration=$((10*($epoch-1)+$run))
             if [[ ! -f "$KEY_SIZE_FILE_AFTER_RUN" ]]; then
                 # Add header row
                 echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_RUN"
@@ -675,7 +769,6 @@ for epoch in $(seq 1 3); do
             log "Comparison-load verification - Epoch:$epoch Run:$run TotalSize:$total_size_comparison_load ExpectedFieldLength:$fieldlengthaverage"
             
             # Verify record sizes after avg-run load
-            iteration=$((10*($epoch-1)+$run))
             total_size_avg_run=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0)) FROM usertable;")
             log "Avg-run verification - Epoch:$epoch Run:$run Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
             
@@ -686,9 +779,15 @@ for epoch in $(seq 1 3); do
             # Execute the run phase
             log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
             phase="avg-run"
-            $YCSB run jdbc-array-json -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
-            cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
-            memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
+
+            run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
+                $YCSB run jdbc-array-json -s \
+                -P $WORKLOAD_FILE \
+                -P $JDBC_PROPERTIES \
+                -p db.url="$BACKUP_URL" \
+                -p db.user="$DB_USERNAME" \
+                -p db.passwd="$DB_PWD"
+            
             collect_postgres_metrics $BACKUP_DB_NAME
             write_result "FALSE"
         fi
