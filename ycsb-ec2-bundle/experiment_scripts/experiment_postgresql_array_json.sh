@@ -24,10 +24,10 @@ BACKUP_FILE="./ycsb_dump.sql"
 UNCHANGE_DB_URL="jdbc:postgresql://localhost:5432/$UNCHANGE_DB_NAME"
 
 # Change naming parameters here
-TYPE="postgresql_arrayjson"
-DIST="uniform" # "uniform" OR "zipfian"
+TYPE="postgresql_arrayjson_TOAST"
+DIST="zipfian" # "uniform" OR "zipfian"
 SCALE="heavy" # "heavy" OR "light"
-WORK="mixed" # "mixed" OR "pure"
+WORK="pure" # "mixed" OR "pure"
 RUN="1"
 
 # Define the workload file and the log file
@@ -63,7 +63,7 @@ updateproportion_extend="0"
 scanproportion_extend="0"
 insertproportion_extend="0"
 readmodifywriteproportion_extend="0"
-requestdistribution_extend="uniform"
+requestdistribution_extend="zipfian"
 # Optional specific request distributions for each operation
 readrequestdistribution_extend="uniform"
 updaterequestdistribution_extend="uniform"
@@ -575,8 +575,8 @@ log "Reference-load verification - TotalSize:$total_size_reference_load Expected
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
 # Experiment parameters
-for epoch in $(seq 1 1); do
-    for run in $(seq 1 1); do
+for epoch in $(seq 1 10); do
+    for run in $(seq 1 10); do
 
         iteration=$((10*($epoch-1)+$run))
         
