@@ -128,6 +128,12 @@ collect_db_stats() {
 
 write_db_stats_header
 
+if [ "${ONESHOT_DBSTATS:-0}" = "1" ]; then
+    ts=$(date +%s)
+    echo "$phase,$epoch,$ts,$(collect_db_stats)" >> "$DB_STATS_FILE"
+    exit 0
+fi
+
 prev_read=0
 prev_write=0
 

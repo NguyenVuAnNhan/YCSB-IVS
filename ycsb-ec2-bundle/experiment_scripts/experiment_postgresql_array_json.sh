@@ -50,6 +50,10 @@ vacuum=1
 
 # Plan log file
 PLAN_LOG="./${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_query_plan.log"
+INTERNAL_DATA_DIR="../analysis/Data/Internal_data"
+DETOAST_PROBE_LOG="${INTERNAL_DATA_DIR}/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}_detoast_probe.log"
+DETOAST_PROBE_ENABLED=${DETOAST_PROBE_ENABLED:-1}
+DETOAST_PROBE_EVERY=${DETOAST_PROBE_EVERY:-1}
 
 # Extend phase experiment parameters
 extendproportion_extend="1"
@@ -99,8 +103,10 @@ run_with_metrics() {
     shift 4
 
     metrics_file="../analysis/${db_name}_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_${phase}.metrics"
+    db_stats_file="${INTERNAL_DATA_DIR}/${db_name}_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_${phase}.dbstats"
 
     echo "Starting metrics collection for $db_name"
+    mkdir -p "$INTERNAL_DATA_DIR"
 
     # Start watcher
     setsid env \
@@ -110,6 +116,8 @@ run_with_metrics() {
         phase="$phase" \
         epoch="$epoch" \
         metrics_file="$metrics_file" \
+        DB_STATS_FILE="$db_stats_file" \
+        DB_STATS_TABLE="usertable" \
         INTERVAL=1 \
         ./watcher.sh &
     watcher_pid=$!
@@ -127,6 +135,27 @@ run_with_metrics() {
 
     echo "Finished $db_name phase=$phase epoch=$epoch (exit=$status)"
     set -e
+}
+
+record_db_stats_once() {
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local metrics_file="../analysis/${db_name}_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_${phase_label}.metrics"
+    local db_stats_file="${INTERNAL_DATA_DIR}/${db_name}_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_${phase_label}.dbstats"
+
+    mkdir -p "$INTERNAL_DATA_DIR"
+    env \
+        DB_PWD="$DB_PWD" \
+        DB_USERNAME="$DB_USERNAME" \
+        db_name="$db_name" \
+        phase="$phase_label" \
+        epoch="$epoch_label" \
+        metrics_file="$metrics_file" \
+        DB_STATS_FILE="$db_stats_file" \
+        DB_STATS_TABLE="usertable" \
+        ONESHOT_DBSTATS=1 \
+        ./watcher.sh
 }
 
 # Initialize PostgreSQL database
@@ -152,8 +181,13 @@ initialize_database() {
 > $PLAN_LOG
 > $HISTOGRAM_FILE
 
+mkdir -p "$INTERNAL_DATA_DIR"
+> "$DETOAST_PROBE_LOG"
+
 rm -rf $KEY_SIZE_LOG
 rm -f "$KEY_SIZE_FILE_AFTER_EXTEND" "$KEY_SIZE_FILE_AFTER_RUN"
+find "$INTERNAL_DATA_DIR" -maxdepth 1 -type f \
+    -name "*${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}*.dbstats" -delete
 
 initialize_database "$DB_NAME"
 initialize_database "$UNCHANGE_DB_NAME"
@@ -360,6 +394,134 @@ collect_postgres_metrics() {
     fi
 }
 
+select_detoast_probe_keys() {
+    local key_size_log="$1"
+    local sorted_sizes
+    local count
+    local rank
+
+    sorted_sizes=$(mktemp)
+    awk -F, 'NR > 1 && $2 ~ /^[0-9]+$/ {print $2 "," $1}' "$key_size_log" \
+        | sort -t, -k1,1n > "$sorted_sizes"
+
+    count=$(wc -l < "$sorted_sizes" | tr -d ' ')
+    if [ -z "$count" ] || [ "$count" -eq 0 ]; then
+        rm -f "$sorted_sizes"
+        return
+    fi
+
+    emit_probe_key() {
+        local label="$1"
+        local rank="$2"
+        local line
+        local size
+        local key
+
+        line=$(sed -n "${rank}p" "$sorted_sizes")
+        size=${line%%,*}
+        key=${line#*,}
+        printf '%s,%s,%s\n' "$label" "$key" "$size"
+    }
+
+    emit_probe_key "min" 1
+
+    for label_quantile in "p50:0.50" "p90:0.90" "p95:0.95" "p99:0.99"; do
+        label=${label_quantile%%:*}
+        quantile=${label_quantile#*:}
+        rank=$(awk -v n="$count" -v q="$quantile" 'BEGIN {
+            r = int(n * q + 0.999999);
+            if (r < 1) r = 1;
+            if (r > n) r = n;
+            print r;
+        }')
+        emit_probe_key "$label" "$rank"
+    done
+
+    emit_probe_key "max" "$count"
+    rm -f "$sorted_sizes"
+}
+
+run_jsonb_detoast_probes() {
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local key_size_log="$4"
+
+    if [ "$DETOAST_PROBE_ENABLED" != "1" ]; then
+        return
+    fi
+
+    if [ "$DETOAST_PROBE_EVERY" -gt 1 ] && [ $((epoch_label % DETOAST_PROBE_EVERY)) -ne 0 ]; then
+        return
+    fi
+
+    if [ ! -s "$key_size_log" ]; then
+        log "Skipping detoast probes: missing key size log $key_size_log"
+        return
+    fi
+
+    mkdir -p "$INTERNAL_DATA_DIR"
+    log "Running JSONB detoast probes for $db_name phase=$phase_label epoch=$epoch_label"
+
+    while IFS=, read -r probe_label probe_key probe_size; do
+        {
+            echo "========================================"
+            echo "Epoch=$epoch Run=$run Iteration=$epoch_label Phase=$phase_label Probe=$probe_label Time=$(date)"
+            echo "DB=$db_name"
+            echo "Key=$probe_key"
+            echo "SizeBytes=$probe_size"
+            echo "----------------------------------------"
+            echo "Lookup-only probe"
+            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
+                -v probe_key="$probe_key" -c "
+                EXPLAIN (ANALYZE, BUFFERS)
+                SELECT ycsb_key
+                FROM usertable
+                WHERE ycsb_key = :'probe_key';
+                "
+            echo
+            echo "JSONB array-length detoast probe"
+            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
+                -v probe_key="$probe_key" -c "
+                EXPLAIN (ANALYZE, BUFFERS)
+                SELECT
+                    jsonb_array_length(COALESCE(field0, '[]'::jsonb)) +
+                    jsonb_array_length(COALESCE(field1, '[]'::jsonb)) +
+                    jsonb_array_length(COALESCE(field2, '[]'::jsonb)) +
+                    jsonb_array_length(COALESCE(field3, '[]'::jsonb)) +
+                    jsonb_array_length(COALESCE(field4, '[]'::jsonb)) +
+                    jsonb_array_length(COALESCE(field5, '[]'::jsonb)) +
+                    jsonb_array_length(COALESCE(field6, '[]'::jsonb)) +
+                    jsonb_array_length(COALESCE(field7, '[]'::jsonb)) +
+                    jsonb_array_length(COALESCE(field8, '[]'::jsonb)) +
+                    jsonb_array_length(COALESCE(field9, '[]'::jsonb)) AS jsonb_array_element_count
+                FROM usertable
+                WHERE ycsb_key = :'probe_key';
+                "
+            echo
+            echo "Detoast and JSONB serialization probe"
+            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
+                -v probe_key="$probe_key" -c "
+                EXPLAIN (ANALYZE, BUFFERS)
+                SELECT
+                    octet_length(field0::text) +
+                    octet_length(field1::text) +
+                    octet_length(field2::text) +
+                    octet_length(field3::text) +
+                    octet_length(field4::text) +
+                    octet_length(field5::text) +
+                    octet_length(field6::text) +
+                    octet_length(field7::text) +
+                    octet_length(field8::text) +
+                    octet_length(field9::text) AS logical_json_text_bytes
+                FROM usertable
+                WHERE ycsb_key = :'probe_key';
+                "
+            echo
+        } >> "$DETOAST_PROBE_LOG"
+    done < <(select_detoast_probe_keys "$key_size_log")
+}
+
 # Execute the load phase
 log "=== Executing the load phase ==="
 phase="load"
@@ -523,6 +685,9 @@ for epoch in $(seq 1 1); do
             log "VACUUM start: $(date +%s)"
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c "VACUUM (ANALYZE, VERBOSE) usertable;"
             log "VACUUM end: $(date +%s)"
+            record_db_stats_once "$DB_NAME" "post-vacuum" "$iteration"
+        else
+            record_db_stats_once "$DB_NAME" "post-extend-no-vacuum" "$iteration"
         fi
 
         # Setting parameter values for run phase
@@ -593,6 +758,7 @@ for epoch in $(seq 1 1); do
         collect_cpu_memory_metrics
         collect_postgres_metrics $DB_NAME
         write_result "FALSE"
+        run_jsonb_detoast_probes "$DB_NAME" "post-run" "$iteration" "$KEY_SIZE_LOG"
 
         # Save keys to remove duplicates later
         PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
