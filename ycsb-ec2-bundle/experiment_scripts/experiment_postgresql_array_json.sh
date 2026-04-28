@@ -54,6 +54,7 @@ INTERNAL_DATA_DIR="../analysis/Data/Internal_data"
 DETOAST_PROBE_LOG="${INTERNAL_DATA_DIR}/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}_detoast_probe.log"
 DETOAST_PROBE_ENABLED=${DETOAST_PROBE_ENABLED:-1}
 DETOAST_PROBE_EVERY=${DETOAST_PROBE_EVERY:-1}
+DB_STATS_INTERVAL=${DB_STATS_INTERVAL:-60}
 
 # Extend phase experiment parameters
 extendproportion_extend="1"
@@ -118,6 +119,7 @@ run_with_metrics() {
         metrics_file="$metrics_file" \
         DB_STATS_FILE="$db_stats_file" \
         DB_STATS_TABLE="usertable" \
+        DB_STATS_INTERVAL="$DB_STATS_INTERVAL" \
         INTERVAL=1 \
         ./watcher.sh &
     watcher_pid=$!
@@ -472,51 +474,54 @@ run_jsonb_detoast_probes() {
             echo "SizeBytes=$probe_size"
             echo "----------------------------------------"
             echo "Lookup-only probe"
-            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
-                -v probe_key="$probe_key" -c "
-                EXPLAIN (ANALYZE, BUFFERS)
-                SELECT ycsb_key
-                FROM usertable
-                WHERE ycsb_key = :'probe_key';
-                "
+            printf '%s\n' \
+                "EXPLAIN (ANALYZE, BUFFERS)" \
+                "SELECT ycsb_key" \
+                "FROM usertable" \
+                "WHERE ycsb_key = :'probe_key';" \
+                | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
+                    -v ON_ERROR_STOP=1 \
+                    -v probe_key="$probe_key"
             echo
             echo "JSONB array-length detoast probe"
-            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
-                -v probe_key="$probe_key" -c "
-                EXPLAIN (ANALYZE, BUFFERS)
-                SELECT
-                    jsonb_array_length(COALESCE(field0, '[]'::jsonb)) +
-                    jsonb_array_length(COALESCE(field1, '[]'::jsonb)) +
-                    jsonb_array_length(COALESCE(field2, '[]'::jsonb)) +
-                    jsonb_array_length(COALESCE(field3, '[]'::jsonb)) +
-                    jsonb_array_length(COALESCE(field4, '[]'::jsonb)) +
-                    jsonb_array_length(COALESCE(field5, '[]'::jsonb)) +
-                    jsonb_array_length(COALESCE(field6, '[]'::jsonb)) +
-                    jsonb_array_length(COALESCE(field7, '[]'::jsonb)) +
-                    jsonb_array_length(COALESCE(field8, '[]'::jsonb)) +
-                    jsonb_array_length(COALESCE(field9, '[]'::jsonb)) AS jsonb_array_element_count
-                FROM usertable
-                WHERE ycsb_key = :'probe_key';
-                "
+            printf '%s\n' \
+                "EXPLAIN (ANALYZE, BUFFERS)" \
+                "SELECT" \
+                "    jsonb_array_length(COALESCE(field0, '[]'::jsonb)) +" \
+                "    jsonb_array_length(COALESCE(field1, '[]'::jsonb)) +" \
+                "    jsonb_array_length(COALESCE(field2, '[]'::jsonb)) +" \
+                "    jsonb_array_length(COALESCE(field3, '[]'::jsonb)) +" \
+                "    jsonb_array_length(COALESCE(field4, '[]'::jsonb)) +" \
+                "    jsonb_array_length(COALESCE(field5, '[]'::jsonb)) +" \
+                "    jsonb_array_length(COALESCE(field6, '[]'::jsonb)) +" \
+                "    jsonb_array_length(COALESCE(field7, '[]'::jsonb)) +" \
+                "    jsonb_array_length(COALESCE(field8, '[]'::jsonb)) +" \
+                "    jsonb_array_length(COALESCE(field9, '[]'::jsonb)) AS jsonb_array_element_count" \
+                "FROM usertable" \
+                "WHERE ycsb_key = :'probe_key';" \
+                | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
+                    -v ON_ERROR_STOP=1 \
+                    -v probe_key="$probe_key"
             echo
             echo "Detoast and JSONB serialization probe"
-            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
-                -v probe_key="$probe_key" -c "
-                EXPLAIN (ANALYZE, BUFFERS)
-                SELECT
-                    octet_length(field0::text) +
-                    octet_length(field1::text) +
-                    octet_length(field2::text) +
-                    octet_length(field3::text) +
-                    octet_length(field4::text) +
-                    octet_length(field5::text) +
-                    octet_length(field6::text) +
-                    octet_length(field7::text) +
-                    octet_length(field8::text) +
-                    octet_length(field9::text) AS logical_json_text_bytes
-                FROM usertable
-                WHERE ycsb_key = :'probe_key';
-                "
+            printf '%s\n' \
+                "EXPLAIN (ANALYZE, BUFFERS)" \
+                "SELECT" \
+                "    octet_length(field0::text) +" \
+                "    octet_length(field1::text) +" \
+                "    octet_length(field2::text) +" \
+                "    octet_length(field3::text) +" \
+                "    octet_length(field4::text) +" \
+                "    octet_length(field5::text) +" \
+                "    octet_length(field6::text) +" \
+                "    octet_length(field7::text) +" \
+                "    octet_length(field8::text) +" \
+                "    octet_length(field9::text) AS logical_json_text_bytes" \
+                "FROM usertable" \
+                "WHERE ycsb_key = :'probe_key';" \
+                | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
+                    -v ON_ERROR_STOP=1 \
+                    -v probe_key="$probe_key"
             echo
         } >> "$DETOAST_PROBE_LOG"
     done < <(select_detoast_probe_keys "$key_size_log")
@@ -758,6 +763,7 @@ for epoch in $(seq 1 1); do
         collect_cpu_memory_metrics
         collect_postgres_metrics $DB_NAME
         write_result "FALSE"
+        record_db_stats_once "$DB_NAME" "post-run" "$iteration"
         run_jsonb_detoast_probes "$DB_NAME" "post-run" "$iteration" "$KEY_SIZE_LOG"
 
         # Save keys to remove duplicates later

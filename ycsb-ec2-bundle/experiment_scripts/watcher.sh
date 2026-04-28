@@ -5,6 +5,7 @@
 
 # Optional: interval (seconds)
 INTERVAL=${INTERVAL:-1}
+DB_STATS_INTERVAL=${DB_STATS_INTERVAL:-60}
 DB_STATS_TABLE=${DB_STATS_TABLE:-usertable}
 
 if [[ "$metrics_file" == *.metrics ]]; then
@@ -30,13 +31,12 @@ psql_csv() {
     local database="$1"
     local query="$2"
 
-    PGPASSWORD="$DB_PWD" psql -X -q -t -A -F"," \
+    printf '%s\n' "$query" | PGPASSWORD="$DB_PWD" psql -X -q -t -A -F"," \
         -v ON_ERROR_STOP=1 \
         -v watch_db="$db_name" \
         -v stats_table="$DB_STATS_TABLE" \
         -U "$DB_USERNAME" \
-        -d "$database" \
-        -c "$query" 2>/dev/null | sed '/^[[:space:]]*$/d' | head -n 1
+        -d "$database" 2>/dev/null | sed '/^[[:space:]]*$/d' | head -n 1
 }
 
 write_db_stats_header() {
@@ -136,6 +136,7 @@ fi
 
 prev_read=0
 prev_write=0
+last_db_stats=0
 
 while true; do
     # --- Get PIDs ---
@@ -186,7 +187,10 @@ while true; do
     # --- Log ---
     ts=$(date +%s)
     echo "$phase,$epoch,$ts,$cpu,$mem_kb,$delta_read,$delta_write" >> "$metrics_file"
-    echo "$phase,$epoch,$ts,$(collect_db_stats)" >> "$DB_STATS_FILE"
+    if [ "$DB_STATS_INTERVAL" -gt 0 ] && [ $((ts - last_db_stats)) -ge "$DB_STATS_INTERVAL" ]; then
+        echo "$phase,$epoch,$ts,$(collect_db_stats)" >> "$DB_STATS_FILE"
+        last_db_stats=$ts
+    fi
 
     sleep "$INTERVAL"
 done
