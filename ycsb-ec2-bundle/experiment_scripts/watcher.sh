@@ -2,9 +2,12 @@
 
 # Required env vars:
 # DB_PWD, DB_USERNAME, db_name, phase, epoch, metrics_file
+#
+# metrics_file columns:
+# Phase,Epoch,Timestamp,CPU,Memory,pg_delta_read_bytes,pg_delta_write_bytes
 
 # Optional: interval (seconds)
-INTERVAL=${INTERVAL:-1}
+INTERVAL=${INTERVAL:-5}
 DB_STATS_INTERVAL=${DB_STATS_INTERVAL:-60}
 DB_STATS_TABLE=${DB_STATS_TABLE:-usertable}
 
@@ -126,6 +129,76 @@ collect_db_stats() {
     printf '%s,%s,%s,%s,%s' "$db_stats" "$bgwriter_stats" "$wal_stats" "$relation_stats" "$table_stats"
 }
 
+collect_pg_io_totals() {
+    local totals
+
+    totals=$(psql_csv postgres "
+        WITH settings AS (
+            SELECT current_setting('block_size')::bigint AS block_size
+        ),
+        db AS (
+            SELECT COALESCE(blks_read, 0)::bigint AS blks_read,
+                   COALESCE(temp_bytes, 0)::bigint AS temp_bytes
+            FROM pg_stat_database
+            WHERE datname = :'watch_db'
+        ),
+        bgwriter AS (
+            SELECT COALESCE(buffers_checkpoint, 0)::bigint AS buffers_checkpoint,
+                   COALESCE(buffers_clean, 0)::bigint AS buffers_clean,
+                   COALESCE(buffers_backend, 0)::bigint AS buffers_backend
+            FROM pg_stat_bgwriter
+        ),
+        wal AS (
+            SELECT COALESCE(wal_bytes, 0)::numeric::bigint AS wal_bytes
+            FROM pg_stat_wal
+        )
+        SELECT (db.blks_read * settings.block_size)::bigint,
+               (
+                   wal.wal_bytes
+                   + ((bgwriter.buffers_checkpoint + bgwriter.buffers_clean + bgwriter.buffers_backend) * settings.block_size)
+                   + db.temp_bytes
+               )::bigint
+        FROM settings
+        CROSS JOIN db
+        CROSS JOIN bgwriter
+        CROSS JOIN wal;
+    ")
+
+    if [ -z "$totals" ]; then
+        totals=$(psql_csv postgres "
+            WITH settings AS (
+                SELECT current_setting('block_size')::bigint AS block_size
+            ),
+            db AS (
+                SELECT COALESCE(blks_read, 0)::bigint AS blks_read,
+                       COALESCE(temp_bytes, 0)::bigint AS temp_bytes
+                FROM pg_stat_database
+                WHERE datname = :'watch_db'
+            ),
+            bgwriter AS (
+                SELECT COALESCE(buffers_checkpoint, 0)::bigint AS buffers_checkpoint,
+                       COALESCE(buffers_clean, 0)::bigint AS buffers_clean,
+                       COALESCE(buffers_backend, 0)::bigint AS buffers_backend
+                FROM pg_stat_bgwriter
+            )
+            SELECT (db.blks_read * settings.block_size)::bigint,
+                   (
+                       ((bgwriter.buffers_checkpoint + bgwriter.buffers_clean + bgwriter.buffers_backend) * settings.block_size)
+                       + db.temp_bytes
+                   )::bigint
+            FROM settings
+            CROSS JOIN db
+            CROSS JOIN bgwriter;
+        ")
+    fi
+
+    printf '%s' "$totals"
+}
+
+is_integer() {
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+
 write_db_stats_header
 
 if [ "${ONESHOT_DBSTATS:-0}" = "1" ]; then
@@ -134,54 +207,52 @@ if [ "${ONESHOT_DBSTATS:-0}" = "1" ]; then
     exit 0
 fi
 
-prev_read=0
-prev_write=0
+prev_pg_read_bytes=""
+prev_pg_write_bytes=""
 last_db_stats=0
 
 while true; do
     # --- Get PIDs ---
-    pids=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d postgres -t -A \
-        -v watch_db="$db_name" \
-        -c "SELECT pid FROM pg_stat_activity WHERE datname = :'watch_db';" 2>/dev/null \
+    pids=$(printf '%s\n' "SELECT pid FROM pg_stat_activity WHERE datname = :'watch_db';" \
+        | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d postgres -t -A \
+        -v ON_ERROR_STOP=1 \
+        -v watch_db="$db_name" 2>/dev/null \
         | paste -sd "," -)
 
     if [ -z "$pids" ]; then
         cpu="NULL"
         mem_kb="NULL"
-        delta_read="NULL"
-        delta_write="NULL"
     else
         # --- CPU + Memory ---
         cpu=$(ps -p "$pids" -o %cpu= 2>/dev/null | awk '{sum += $1} END {print sum}')
         mem_kb=$(ps -p "$pids" -o rss= 2>/dev/null | awk '{sum += $1} END {print sum}')
         cpu=${cpu:-0}
         mem_kb=${mem_kb:-0}
+    fi
 
-        # --- Disk I/O (cumulative) ---
-        read_bytes=0
-        write_bytes=0
+    pg_io_totals=$(collect_pg_io_totals)
+    pg_read_bytes=${pg_io_totals%%,*}
+    pg_write_bytes=${pg_io_totals#*,}
 
-        IFS=',' read -ra pid_array <<< "$pids"
-        for pid in "${pid_array[@]}"; do
-            io_file="/proc/$pid/io"
-            if [ -r "$io_file" ]; then
-                r=$(awk '/read_bytes/ {print $2}' "$io_file")
-                w=$(awk '/write_bytes/ {print $2}' "$io_file")
-                read_bytes=$((read_bytes + r))
-                write_bytes=$((write_bytes + w))
-            fi
-        done
+    if [ -z "$pg_io_totals" ] || [ "$pg_read_bytes" = "$pg_io_totals" ] \
+        || ! is_integer "$pg_read_bytes" || ! is_integer "$pg_write_bytes"; then
+        delta_read="NULL"
+        delta_write="NULL"
+    elif [ -z "$prev_pg_read_bytes" ] || [ -z "$prev_pg_write_bytes" ]; then
+        delta_read=0
+        delta_write=0
+        prev_pg_read_bytes=$pg_read_bytes
+        prev_pg_write_bytes=$pg_write_bytes
+    else
+        delta_read=$((pg_read_bytes - prev_pg_read_bytes))
+        delta_write=$((pg_write_bytes - prev_pg_write_bytes))
 
-        # --- Convert to per-interval (delta) ---
-        delta_read=$((read_bytes - prev_read))
-        delta_write=$((write_bytes - prev_write))
+        # PostgreSQL stats can reset; avoid negative deltas poisoning phase aggregates.
+        [ "$delta_read" -lt 0 ] && delta_read=0
+        [ "$delta_write" -lt 0 ] && delta_write=0
 
-        # Handle PID churn / resets
-        [ $delta_read -lt 0 ] && delta_read=0
-        [ $delta_write -lt 0 ] && delta_write=0
-
-        prev_read=$read_bytes
-        prev_write=$write_bytes
+        prev_pg_read_bytes=$pg_read_bytes
+        prev_pg_write_bytes=$pg_write_bytes
     fi
 
     # --- Log ---
