@@ -10,43 +10,48 @@ export PATH="$YCSB_HOME/bin:$PATH"
 YCSB="../bin/ycsb.sh"
 
 # DB names
-DB_NAME="ycsb"
-BACKUP_DB_NAME="ycsb_backup"
-UNCHANGE_DB_NAME="ycsb_unchange"
+DB_NAME="${DB_NAME:-ycsb}"
+BACKUP_DB_NAME="${BACKUP_DB_NAME:-ycsb_backup}"
+UNCHANGE_DB_NAME="${UNCHANGE_DB_NAME:-ycsb_unchange}"
 
 # Path to the PostgreSQL data directory
-DB_URL="jdbc:postgresql://localhost:5432/$DB_NAME"
-JDBC_PROPERTIES="../jdbc-binding/conf/postgres.properties"
-DB_USERNAME="ycsb"
-DB_PWD="USyd2025"
-BACKUP_URL="jdbc:postgresql://localhost:5432/$BACKUP_DB_NAME"
-BACKUP_FILE="./ycsb_dump.sql"
-UNCHANGE_DB_URL="jdbc:postgresql://localhost:5432/$UNCHANGE_DB_NAME"
+DB_URL="${DB_URL:-jdbc:postgresql://localhost:5432/$DB_NAME}"
+JDBC_PROPERTIES="${JDBC_PROPERTIES:-../jdbc-binding/conf/postgres.properties}"
+DB_USERNAME="${DB_USERNAME:-ycsb}"
+DB_PWD="${DB_PWD:-USyd2025}"
+PG_EXTENSION_USERNAME="${PG_EXTENSION_USERNAME:-$DB_USERNAME}"
+PG_EXTENSION_PWD="${PG_EXTENSION_PWD:-$DB_PWD}"
+BACKUP_URL="${BACKUP_URL:-jdbc:postgresql://localhost:5432/$BACKUP_DB_NAME}"
+BACKUP_FILE="${BACKUP_FILE:-./ycsb_dump.sql}"
+UNCHANGE_DB_URL="${UNCHANGE_DB_URL:-jdbc:postgresql://localhost:5432/$UNCHANGE_DB_NAME}"
 
 # Change naming parameters here
-TYPE="postgresql_arrayjson_TOAST"
-DIST="zipfian" # "uniform" OR "zipfian"
-SCALE="heavy" # "heavy" OR "light"
-WORK="pure" # "mixed" OR "pure"
-RUN="1"
+TYPE="${TYPE:-postgresql_arrayjson_TOAST}"
+DIST="${DIST:-zipfian}" # "uniform" OR "zipfian"
+SCALE="${SCALE:-heavy}" # "heavy" OR "light"
+WORK="${WORK:-pure}" # "mixed" OR "pure"
+RUN="${RUN:-1}"
 
 # Define the workload file and the log file
-WORKLOAD_FILE="../workloads/workloada-extend"
-LOG_FILE="./ycsb_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_results.log"
-OUTPUT_CSV="../analysis/postgresql_array_output.csv"
+WORKLOAD_FILE="${WORKLOAD_FILE:-../workloads/workloada-extend}"
+LOG_FILE="${LOG_FILE:-./ycsb_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_results.log}"
+OUTPUT_CSV="${OUTPUT_CSV:-../analysis/postgresql_array_output.csv}"
 
 # Define input and output filenames
-INPUT_FILE="../analysis/postgresql_array_output.csv"
-OUTPUT_FILE="../analysis/Data/Workload_data/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}.csv"
+INPUT_FILE="${INPUT_FILE:-$OUTPUT_CSV}"
+OUTPUT_FILE="${OUTPUT_FILE:-../analysis/Data/Workload_data/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}.csv}"
+EXPERIMENT_EPOCHS=${EXPERIMENT_EPOCHS:-10}
+EXPERIMENT_RUNS_PER_EPOCH=${EXPERIMENT_RUNS_PER_EPOCH:-10}
+COMPARISON_INTERVAL=${COMPARISON_INTERVAL:-1}
 
 # Key size gathering
-KEY_SIZE_LOG="key_sizes_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}.csv"
-KEY_SIZE_FILE_AFTER_EXTEND="../analysis/Data/Value_size_data/value_sizes_${TYPE}_run${RUN}_${DIST}_${SCALE}_before_${WORK}.csv"
-KEY_SIZE_FILE_AFTER_RUN="../analysis/Data/Value_size_data/value_sizes_${TYPE}_run${RUN}_${DIST}_${SCALE}_after_${WORK}.csv"
-HISTOGRAM_FILE="histogram.txt"
+KEY_SIZE_LOG="${KEY_SIZE_LOG:-key_sizes_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}.csv}"
+KEY_SIZE_FILE_AFTER_EXTEND="${KEY_SIZE_FILE_AFTER_EXTEND:-../analysis/Data/Value_size_data/value_sizes_${TYPE}_run${RUN}_${DIST}_${SCALE}_before_${WORK}.csv}"
+KEY_SIZE_FILE_AFTER_RUN="${KEY_SIZE_FILE_AFTER_RUN:-../analysis/Data/Value_size_data/value_sizes_${TYPE}_run${RUN}_${DIST}_${SCALE}_after_${WORK}.csv}"
+HISTOGRAM_FILE="${HISTOGRAM_FILE:-histogram.txt}"
 
 # VACUUM settings
-vacuum=1
+vacuum=${VACUUM_ENABLED:-1}
 
 # Plan log file
 PLAN_LOG="./${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_query_plan.log"
@@ -55,6 +60,21 @@ DETOAST_PROBE_LOG="${INTERNAL_DATA_DIR}/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WOR
 DETOAST_PROBE_ENABLED=${DETOAST_PROBE_ENABLED:-1}
 DETOAST_PROBE_EVERY=${DETOAST_PROBE_EVERY:-1}
 DB_STATS_INTERVAL=${DB_STATS_INTERVAL:-60}
+SPIKE_TRIGGER_TRACE_ENABLED=${SPIKE_TRIGGER_TRACE_ENABLED:-1}
+SPIKE_TRIGGER_READ_SAMPLE_RATE=${SPIKE_TRIGGER_READ_SAMPLE_RATE:-100}
+SPIKE_TRIGGER_SLOW_READ_US=${SPIKE_TRIGGER_SLOW_READ_US:-1000}
+RUN_NAME="${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}"
+TRIGGER_DATA_DIR="${INTERNAL_DATA_DIR}/toast_spike_trigger"
+PHASE_TIMELINE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_phase_timeline.csv"
+PG_1S_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_pg_1s.csv"
+OS_1S_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_os_1s.csv"
+CHECKPOINT_OBSERVATIONS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_checkpoint_observations.csv"
+VACUUM_PROGRESS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_vacuum_progress_1s.csv"
+BUFFER_RESIDENCY_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_buffer_residency.csv"
+READ_SAMPLE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_read_sample.csv"
+SLOW_READ_SAMPLE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_slow_read_sample.csv"
+SAMPLED_DETOAST_PROBE_LOG="${TRIGGER_DATA_DIR}/${RUN_NAME}_detoast_probe_sampled_keys.log"
+YCSB_READ_SAMPLE_ARGS=()
 
 # Extend phase experiment parameters
 extendproportion_extend="1"
@@ -80,17 +100,277 @@ requestdistribution_postextend="uniform"
 readrequestdistribution_postextend="uniform"
 updaterequestdistribution_postextend="uniform"
 
-fieldlengthoriginal="100"
-extendoperationcount="100000"
+fieldlengthoriginal="${FIELD_LENGTH_ORIGINAL:-100}"
+extendoperationcount="${EXTEND_OPERATIONCOUNT:-100000}"
 
 # Function to log and print messages
 log() {
     echo "$1" | tee -a $LOG_FILE
 }
 
+ensure_pg_buffercache_extension() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local buffercache_schema grant_role
+    grant_role=${DB_USERNAME//\"/\"\"}
+
+    if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "CREATE EXTENSION IF NOT EXISTS pg_buffercache;" >/dev/null 2>&1
+    then
+        log "Warning: could not ensure pg_buffercache in $db_name. Buffer residency rows may show pg_buffercache_unavailable. Set PG_EXTENSION_USERNAME/PG_EXTENSION_PWD to a role that can create extensions, or install pg_buffercache in template1."
+        return
+    fi
+
+    buffercache_schema=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -U "$PG_EXTENSION_USERNAME" -d "$db_name" -At -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_buffercache';
+    " 2>/dev/null || true)
+
+    if [ -z "$buffercache_schema" ]; then
+        log "Warning: pg_buffercache extension was not found in $db_name after CREATE EXTENSION."
+        return
+    fi
+
+    if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "GRANT SELECT ON ${buffercache_schema}.pg_buffercache TO \"$grant_role\";" >/dev/null 2>&1
+    then
+        log "Warning: could not grant SELECT on ${buffercache_schema}.pg_buffercache to $DB_USERNAME in $db_name."
+    fi
+}
+
 collect_cpu_memory_metrics() {
     cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum + 0}')
     memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum + 0}')
+}
+
+timestamp_ms() {
+    date +%s%3N
+}
+
+csv_escape() {
+    local value="${1:-}"
+    value=${value//\"/\"\"}
+    if [[ "$value" == *","* || "$value" == *$'\n'* || "$value" == *$'\r'* || "$value" == *"\""* ]]; then
+        printf '"%s"' "$value"
+    else
+        printf '%s' "$value"
+    fi
+}
+
+init_spike_trigger_trace() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
+        return
+    fi
+
+    rm -rf "$TRIGGER_DATA_DIR"
+    mkdir -p "$TRIGGER_DATA_DIR"
+    {
+        echo "run_name,epoch,phase,event,timestamp_unix_ms,timestamp_iso,record_count,operation_count,request_distribution,field_length,notes"
+    } > "$PHASE_TIMELINE_FILE"
+    {
+        echo "run_name,epoch,phase,event,timestamp_unix_ms,checkpoints_timed,checkpoints_req,checkpoint_write_time,checkpoint_sync_time,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,wal_bytes,wal_records"
+    } > "$CHECKPOINT_OBSERVATIONS_FILE"
+    {
+        echo "run_name,epoch,timestamp_unix_ms,relation,phase,heap_blks_total,heap_blks_scanned,heap_blks_vacuumed,index_vacuum_count,max_dead_tuples,num_dead_tuples"
+    } > "$VACUUM_PROGRESS_FILE"
+    {
+        echo "run_name,epoch,phase,event,timestamp_unix_ms,relation_name,buffers,bytes"
+    } > "$BUFFER_RESIDENCY_FILE"
+    {
+        echo "run_name,epoch,phase,timestamp_unix_ms,probe_label,ycsb_key,size_bytes"
+    } > "$SAMPLED_DETOAST_PROBE_LOG"
+}
+
+record_phase_event() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local phase_label="$1"
+    local epoch_label="$2"
+    local event_label="$3"
+    local notes="${4:-}"
+    local ts_ms iso operation_count field_length
+
+    ts_ms=$(timestamp_ms)
+    iso=$(date -Iseconds)
+    operation_count=$(grep -E '^operationcount=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
+    field_length=$(grep -E '^fieldlength=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
+
+    {
+        csv_escape "$RUN_NAME"; printf ','
+        printf '%s,%s,%s,%s,' "$epoch_label" "$phase_label" "$event_label" "$ts_ms"
+        csv_escape "$iso"; printf ','
+        csv_escape "${recordcount:-}"; printf ','
+        csv_escape "$operation_count"; printf ','
+        csv_escape "${requestdistribution:-}"; printf ','
+        csv_escape "$field_length"; printf ','
+        csv_escape "$notes"; printf '\n'
+    } >> "$PHASE_TIMELINE_FILE"
+}
+
+record_checkpoint_observation() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+    local ts_ms row
+
+    ts_ms=$(timestamp_ms)
+    row=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -At -F"," -c "
+        SELECT bg.checkpoints_timed, bg.checkpoints_req,
+               bg.checkpoint_write_time, bg.checkpoint_sync_time,
+               bg.buffers_checkpoint, bg.buffers_clean, bg.buffers_backend,
+               bg.buffers_alloc,
+               COALESCE(wal.wal_bytes, 0), COALESCE(wal.wal_records, 0)
+        FROM pg_stat_bgwriter bg
+        CROSS JOIN LATERAL (
+            SELECT wal_bytes, wal_records
+            FROM pg_stat_wal
+        ) wal;
+    " 2>/dev/null || true)
+
+    [ -z "$row" ] && row="NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL"
+    echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,$row" >> "$CHECKPOINT_OBSERVATIONS_FILE"
+}
+
+record_buffer_residency() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+    local ts_ms buffercache_schema rows
+
+    ts_ms=$(timestamp_ms)
+    buffercache_schema=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -At -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_buffercache';
+    " 2>/dev/null || true)
+    if [ -z "$buffercache_schema" ]; then
+        echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,pg_buffercache_unavailable,NULL,NULL" >> "$BUFFER_RESIDENCY_FILE"
+        return
+    fi
+
+    rows=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -At -F"," -c "
+        WITH heap AS (
+            SELECT c.oid AS heap_oid,
+                   c.relname AS heap_name,
+                   c.reltoastrelid AS toast_oid
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relname = 'usertable'
+            ORDER BY n.nspname = 'public' DESC, n.nspname
+            LIMIT 1
+        ),
+        rels AS (
+            SELECT heap_oid AS oid, heap_name AS relname FROM heap
+            UNION ALL
+            SELECT toast_oid, t.relname
+            FROM heap h
+            JOIN pg_class t ON t.oid = h.toast_oid
+            WHERE h.toast_oid <> 0
+            UNION ALL
+            SELECT i.indexrelid, ci.relname
+            FROM heap h
+            JOIN pg_index i ON i.indrelid = h.toast_oid
+            JOIN pg_class ci ON ci.oid = i.indexrelid
+        )
+        SELECT rels.relname,
+               count(b.*) AS buffers,
+               count(b.*) * current_setting('block_size')::int AS bytes
+        FROM rels
+        LEFT JOIN ${buffercache_schema}.pg_buffercache b ON b.relfilenode = pg_relation_filenode(rels.oid)
+        GROUP BY rels.relname
+        ORDER BY rels.relname;
+    " 2>/dev/null || true)
+
+    if [ -z "$rows" ]; then
+        echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,pg_buffercache_empty,NULL,NULL" >> "$BUFFER_RESIDENCY_FILE"
+        return
+    fi
+
+    while IFS= read -r row; do
+        echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,$row" >> "$BUFFER_RESIDENCY_FILE"
+    done <<< "$rows"
+}
+
+start_vacuum_progress_sampler() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
+        echo ""
+        return
+    fi
+
+    local db_name="$1"
+    local epoch_label="$2"
+    (
+        while true; do
+            local ts_ms rows
+            ts_ms=$(timestamp_ms)
+            rows=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -At -F"," -c "
+                SELECT COALESCE(relid::regclass::text, 'unknown'),
+                       COALESCE(phase, 'unknown'),
+                       COALESCE(heap_blks_total, 0),
+                       COALESCE(heap_blks_scanned, 0),
+                       COALESCE(heap_blks_vacuumed, 0),
+                       COALESCE(index_vacuum_count, 0),
+                       COALESCE(max_dead_tuples, 0),
+                       COALESCE(num_dead_tuples, 0)
+                FROM pg_stat_progress_vacuum;
+            " 2>/dev/null || true)
+            if [ -n "$rows" ]; then
+                while IFS= read -r row; do
+                    echo "$RUN_NAME,$epoch_label,$ts_ms,$row" >> "$VACUUM_PROGRESS_FILE"
+                done <<< "$rows"
+            fi
+            sleep 1
+        done
+    ) >/dev/null 2>&1 &
+    echo "$!"
+}
+
+stop_background_pid() {
+    local pid="${1:-}"
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+}
+
+set_read_sample_args() {
+    local phase_label="$1"
+    local epoch_label="$2"
+
+    YCSB_READ_SAMPLE_ARGS=()
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$phase_label" != "run" ]; then
+        return
+    fi
+
+    YCSB_READ_SAMPLE_ARGS=(
+        -p "jdbc.readsample.file=$READ_SAMPLE_FILE"
+        -p "jdbc.slowread.file=$SLOW_READ_SAMPLE_FILE"
+        -p "jdbc.readsample.rate=$SPIKE_TRIGGER_READ_SAMPLE_RATE"
+        -p "jdbc.slowread.threshold.us=$SPIKE_TRIGGER_SLOW_READ_US"
+        -p "jdbc.readsample.runname=$RUN_NAME"
+        -p "jdbc.readsample.epoch=$epoch_label"
+        -p "jdbc.readsample.phase=$phase_label"
+    )
 }
 
 # CPU and Memory watcher
@@ -100,14 +380,23 @@ run_with_metrics() {
     local phase=$2
     local epoch=$3
     local output_csv=$4
+    local pg_1s_file=""
+    local os_1s_file=""
 
     shift 4
 
     metrics_file="../analysis/${db_name}_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_${phase}.metrics"
     db_stats_file="${INTERNAL_DATA_DIR}/${db_name}_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_${phase}.dbstats"
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" = "1" ]; then
+        pg_1s_file="$PG_1S_FILE"
+        os_1s_file="$OS_1S_FILE"
+    fi
 
     echo "Starting metrics collection for $db_name"
     mkdir -p "$INTERNAL_DATA_DIR"
+    record_phase_event "$phase" "$epoch" "${phase}_start" "db=$db_name"
+    record_checkpoint_observation "$db_name" "$phase" "$epoch" "${phase}_start"
+    record_buffer_residency "$db_name" "$phase" "$epoch" "before_${phase}"
 
     # Start watcher
     setsid env \
@@ -118,6 +407,8 @@ run_with_metrics() {
         epoch="$epoch" \
         metrics_file="$metrics_file" \
         DB_STATS_FILE="$db_stats_file" \
+        PG_1S_FILE="$pg_1s_file" \
+        OS_1S_FILE="$os_1s_file" \
         DB_STATS_TABLE="usertable" \
         DB_STATS_INTERVAL="$DB_STATS_INTERVAL" \
         INTERVAL=1 \
@@ -135,8 +426,12 @@ run_with_metrics() {
 
     trap - EXIT INT TERM
 
+    record_checkpoint_observation "$db_name" "$phase" "$epoch" "${phase}_end"
+    record_buffer_residency "$db_name" "$phase" "$epoch" "after_${phase}"
+    record_phase_event "$phase" "$epoch" "${phase}_end" "db=$db_name exit=$status"
     echo "Finished $db_name phase=$phase epoch=$epoch (exit=$status)"
     set -e
+    return "$status"
 }
 
 record_db_stats_once() {
@@ -167,6 +462,7 @@ initialize_database() {
 
     PGPASSWORD="$DB_PWD" dropdb --if-exists "$db_name" -U "$DB_USERNAME"
     PGPASSWORD="$DB_PWD" createdb "$db_name" -U "$DB_USERNAME"
+    ensure_pg_buffercache_extension "$db_name"
 
     PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -c \
         "CREATE TABLE usertable (
@@ -185,6 +481,7 @@ initialize_database() {
 
 mkdir -p "$INTERNAL_DATA_DIR"
 > "$DETOAST_PROBE_LOG"
+init_spike_trigger_trace
 
 rm -rf $KEY_SIZE_LOG
 rm -f "$KEY_SIZE_FILE_AFTER_EXTEND" "$KEY_SIZE_FILE_AFTER_RUN"
@@ -224,7 +521,7 @@ write_result() {
     if [ "$phase" == "load" ]; then
         r=0
     else
-        r=$((10 * ($epoch - 1) + $run))
+        r=$((EXPERIMENT_RUNS_PER_EPOCH * ($epoch - 1) + $run))
     fi
 
     # Set default values for workload parameters
@@ -466,6 +763,15 @@ run_jsonb_detoast_probes() {
     log "Running JSONB detoast probes for $db_name phase=$phase_label epoch=$epoch_label"
 
     while IFS=, read -r probe_label probe_key probe_size; do
+        if [ "$SPIKE_TRIGGER_TRACE_ENABLED" = "1" ]; then
+            {
+                csv_escape "$RUN_NAME"; printf ','
+                printf '%s,%s,%s,' "$epoch_label" "$phase_label" "$(timestamp_ms)"
+                csv_escape "$probe_label"; printf ','
+                csv_escape "$probe_key"; printf ','
+                csv_escape "$probe_size"; printf '\n'
+            } >> "$SAMPLED_DETOAST_PROBE_LOG"
+        fi
         {
             echo "========================================"
             echo "Epoch=$epoch Run=$run Iteration=$epoch_label Phase=$phase_label Probe=$probe_label Time=$(date)"
@@ -575,10 +881,10 @@ log "Reference-load verification - TotalSize:$total_size_reference_load Expected
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
 # Experiment parameters
-for epoch in $(seq 1 10); do
-    for run in $(seq 1 10); do
+for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
+    for run in $(seq 1 "$EXPERIMENT_RUNS_PER_EPOCH"); do
 
-        iteration=$((10*($epoch-1)+$run))
+        iteration=$((EXPERIMENT_RUNS_PER_EPOCH*($epoch-1)+$run))
         
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
@@ -672,7 +978,7 @@ for epoch in $(seq 1 10); do
         get_key_sizes $KEY_SIZE_LOG $HISTOGRAM_FILE
 
         # Check if the output file exists, if not, create it with headers
-        iteration=$((10*($epoch-1)+$run))
+        iteration=$((EXPERIMENT_RUNS_PER_EPOCH*($epoch-1)+$run))
 
         if [[ ! -f "$KEY_SIZE_FILE_AFTER_EXTEND" ]]; then
             # Add header row
@@ -687,9 +993,16 @@ for epoch in $(seq 1 10); do
         fi
 
         if [[ $vacuum -eq 1 ]]; then
+            record_phase_event "vacuum" "$iteration" "vacuum_start" "db=$DB_NAME"
+            record_checkpoint_observation "$DB_NAME" "vacuum" "$iteration" "vacuum_start"
+            vacuum_progress_pid=$(start_vacuum_progress_sampler "$DB_NAME" "$iteration")
             log "VACUUM start: $(date +%s)"
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c "VACUUM (ANALYZE, VERBOSE) usertable;"
             log "VACUUM end: $(date +%s)"
+            stop_background_pid "$vacuum_progress_pid"
+            record_checkpoint_observation "$DB_NAME" "vacuum" "$iteration" "vacuum_end"
+            record_buffer_residency "$DB_NAME" "vacuum" "$iteration" "after_vacuum"
+            record_phase_event "vacuum" "$iteration" "vacuum_end" "db=$DB_NAME"
             record_db_stats_once "$DB_NAME" "post-vacuum" "$iteration"
         else
             record_db_stats_once "$DB_NAME" "post-extend-no-vacuum" "$iteration"
@@ -751,6 +1064,7 @@ for epoch in $(seq 1 10); do
         # Execute the run phase
         log "=== Executing the run phase with extendproportion=0 and read/update proportions=0.5 ==="
         phase="run"
+        set_read_sample_args "$phase" "$iteration"
         run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
         $YCSB run jdbc-array-json -s \
         -P $WORKLOAD_FILE \
@@ -758,7 +1072,8 @@ for epoch in $(seq 1 10); do
         -p db.url="$DB_URL" \
         -p db.user="$DB_USERNAME" \
         -p db.passwd="$DB_PWD" \
-        -p fieldlengthhistogram="$HISTOGRAM_FILE"
+        -p fieldlengthhistogram="$HISTOGRAM_FILE" \
+        "${YCSB_READ_SAMPLE_ARGS[@]}"
         
         collect_cpu_memory_metrics
         collect_postgres_metrics $DB_NAME
@@ -825,7 +1140,7 @@ for epoch in $(seq 1 10); do
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
     
-        if (( $((10*($epoch-1)+$run)) % 1 == 0 )); then
+        if (( COMPARISON_INTERVAL > 0 && iteration % COMPARISON_INTERVAL == 0 )); then
             phase="clean-run"
             
             log "Backing up the database started"
@@ -837,6 +1152,7 @@ for epoch in $(seq 1 10); do
 
             # Restore backup - --clean ensures tables are dropped before creation
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -f "$BACKUP_FILE" > /dev/null 2>&1 || true
+            ensure_pg_buffercache_extension "$BACKUP_DB_NAME"
             log "Backing up the database finished"
 
             run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \

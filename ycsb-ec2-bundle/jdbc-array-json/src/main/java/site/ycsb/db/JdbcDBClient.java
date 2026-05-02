@@ -24,6 +24,9 @@ import site.ycsb.Status;
 import site.ycsb.StringByteIterator;
 import site.ycsb.db.flavors.DBFlavor;
 
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -38,6 +41,7 @@ import java.util.Set;
 import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 /**
@@ -80,6 +84,23 @@ public class JdbcDBClient extends DB {
 
   public static final String JDBC_BATCH_UPDATES = "jdbc.batchupdateapi";
 
+  /** Optional sampled read trace for spike-trigger analysis. */
+  public static final String READ_SAMPLE_FILE = "jdbc.readsample.file";
+
+  /** Log every Nth read operation to READ_SAMPLE_FILE. A value <= 0 disables sampled reads. */
+  public static final String READ_SAMPLE_RATE = "jdbc.readsample.rate";
+
+  /** Optional slow-read trace. */
+  public static final String SLOW_READ_SAMPLE_FILE = "jdbc.slowread.file";
+
+  /** Slow-read threshold in microseconds. A value <= 0 disables slow-read tracing. */
+  public static final String SLOW_READ_THRESHOLD_US = "jdbc.slowread.threshold.us";
+
+  /** Labels copied into read-sample output for easier timestamp alignment. */
+  public static final String READ_SAMPLE_RUN_NAME = "jdbc.readsample.runname";
+  public static final String READ_SAMPLE_EPOCH = "jdbc.readsample.epoch";
+  public static final String READ_SAMPLE_PHASE = "jdbc.readsample.phase";
+
   /** The name of the property for the number of fields in a record. */
   public static final String FIELD_COUNT_PROPERTY = "fieldcount";
 
@@ -94,6 +115,12 @@ public class JdbcDBClient extends DB {
 
   /** The field name prefix in the table. */
   public static final String COLUMN_PREFIX = "FIELD";
+
+  /** The name of the property for the prefix of field names in a record. */
+  public static final String FIELD_NAME_PREFIX_PROPERTY = "fieldnameprefix";
+
+  /** Default prefix for field names in a record. */
+  public static final String FIELD_NAME_PREFIX_DEFAULT = "field";
 
   /** The delimiter used to split/join array elements. */
   public static final String ARRAY_DELIMITER = "jdbc.array.delimiter";
@@ -112,8 +139,20 @@ public class JdbcDBClient extends DB {
   private boolean batchUpdates;
   private String arrayDelimiter;
   private String arrayDelimiterRegex;
+  private int fieldCount;
+  private String fieldNamePrefix;
+  private List<String> allFieldNames;
   private boolean postgresJsonAppend;
+  private String readSampleFile;
+  private String slowReadSampleFile;
+  private String readSampleRunName;
+  private String readSampleEpoch;
+  private String readSamplePhase;
+  private int readSampleRate;
+  private long slowReadThresholdUs;
   private static final String DEFAULT_PROP = "";
+  private static final Object READ_SAMPLE_LOCK = new Object();
+  private static final AtomicLong READ_SAMPLE_COUNTER = new AtomicLong(0);
   private ConcurrentMap<StatementType, PreparedStatement> cachedStatements;
   private long numRowsInBatch = 0;
   /** DB flavor defines DB-specific syntax and behavior for the
@@ -139,6 +178,17 @@ public class JdbcDBClient extends DB {
     List<String> getFieldValues() {
       return fieldValues;
     }
+  }
+
+  /** Per-read timing buckets for JSONB materialization/parsing diagnostics. */
+  private static class ReadTiming {
+    private long queryExecuteNs;
+    private long resultSetNextNs;
+    private long jsonFetchNs;
+    private long jsonParseNs;
+    private long valueJoinNs;
+    private int fieldsRead;
+    private long resultBytesEstimate;
   }
 
   /**
@@ -214,6 +264,18 @@ public class JdbcDBClient extends DB {
     this.batchUpdates = getBoolProperty(props, JDBC_BATCH_UPDATES, false);
     this.arrayDelimiter = props.getProperty(ARRAY_DELIMITER, ",");
     this.arrayDelimiterRegex = Pattern.quote(arrayDelimiter);
+    this.fieldCount = Integer.parseInt(props.getProperty(FIELD_COUNT_PROPERTY, FIELD_COUNT_PROPERTY_DEFAULT));
+    this.fieldNamePrefix = props.getProperty(FIELD_NAME_PREFIX_PROPERTY, FIELD_NAME_PREFIX_DEFAULT);
+    this.allFieldNames = buildAllFieldNames();
+    this.readSampleFile = emptyToNull(props.getProperty(READ_SAMPLE_FILE));
+    this.slowReadSampleFile = emptyToNull(props.getProperty(SLOW_READ_SAMPLE_FILE));
+    this.readSampleRunName = props.getProperty(READ_SAMPLE_RUN_NAME, "");
+    this.readSampleEpoch = props.getProperty(READ_SAMPLE_EPOCH, "");
+    this.readSamplePhase = props.getProperty(READ_SAMPLE_PHASE, "");
+    this.readSampleRate = Math.max(0, getIntProperty(props, READ_SAMPLE_RATE));
+    this.slowReadThresholdUs = Math.max(0, getLongProperty(props, SLOW_READ_THRESHOLD_US));
+    ensureReadSampleHeader(readSampleFile);
+    ensureReadSampleHeader(slowReadSampleFile);
 
     try {
 //  The SQL Syntax for Scan depends on the DB engine
@@ -364,6 +426,10 @@ public class JdbcDBClient extends DB {
 
   @Override
   public Status read(String tableName, String key, Set<String> fields, Map<String, ByteIterator> result) {
+    long operationIndex = READ_SAMPLE_COUNTER.incrementAndGet();
+    ReadTiming timing = new ReadTiming();
+    Status status = Status.ERROR;
+    long totalStartNs = System.nanoTime();
     try {
       StatementType type = new StatementType(StatementType.Type.READ, tableName, 1, "", getShardIndexByKey(key));
       PreparedStatement readStatement = cachedStatements.get(type);
@@ -371,14 +437,20 @@ public class JdbcDBClient extends DB {
         readStatement = createAndCacheReadStatement(type, key);
       }
       readStatement.setString(1, key);
+      long queryStartNs = System.nanoTime();
       ResultSet resultSet = readStatement.executeQuery();
+      timing.queryExecuteNs = System.nanoTime() - queryStartNs;
+      long nextStartNs = System.nanoTime();
       if (!resultSet.next()) {
+        timing.resultSetNextNs = System.nanoTime() - nextStartNs;
         resultSet.close();
-        return Status.NOT_FOUND;
+        status = Status.NOT_FOUND;
+        return status;
       }
-      if (result != null && fields != null) {
-        for (String field : fields) {
-          String value = readJsonArrayValue(resultSet, field);
+      timing.resultSetNextNs = System.nanoTime() - nextStartNs;
+      for (String field : fieldsToRead(fields)) {
+        String value = readJsonArrayValue(resultSet, field, timing);
+        if (result != null) {
           if (value == null) {
             value = NULL_VALUE;
           }
@@ -386,10 +458,15 @@ public class JdbcDBClient extends DB {
         }
       }
       resultSet.close();
-      return Status.OK;
+      status = Status.OK;
+      return status;
     } catch (SQLException e) {
       System.err.println("Error in processing read of table " + tableName + ": " + e);
+      status = Status.ERROR;
       return Status.ERROR;
+    } finally {
+      long totalReadUs = nanosToMicros(System.nanoTime() - totalStartNs);
+      maybeLogReadSample(operationIndex, key, status, totalReadUs, timing);
     }
   }
 
@@ -413,15 +490,20 @@ public class JdbcDBClient extends DB {
       }
       ResultSet resultSet = scanStatement.executeQuery();
       for (int i = 0; i < recordcount && resultSet.next(); i++) {
-        if (result != null && fields != null) {
-          HashMap<String, ByteIterator> values = new HashMap<String, ByteIterator>();
-          for (String field : fields) {
-            String value = readJsonArrayValue(resultSet, field);
+        HashMap<String, ByteIterator> values = null;
+        if (result != null) {
+          values = new HashMap<String, ByteIterator>();
+        }
+        for (String field : fieldsToRead(fields)) {
+          String value = readJsonArrayValue(resultSet, field);
+          if (values != null) {
             if (value == null) {
               value = NULL_VALUE;
             }
             values.put(field, new StringByteIterator(value));
           }
+        }
+        if (values != null) {
           result.add(values);
         }
       }
@@ -627,11 +709,49 @@ public class JdbcDBClient extends DB {
   }
 
   private String readJsonArrayValue(ResultSet resultSet, String field) throws SQLException {
+    return readJsonArrayValue(resultSet, field, null);
+  }
+
+  private List<String> buildAllFieldNames() {
+    List<String> fieldNames = new ArrayList<String>(fieldCount);
+    for (int i = 0; i < fieldCount; i++) {
+      fieldNames.add(fieldNamePrefix + i);
+    }
+    return fieldNames;
+  }
+
+  private Iterable<String> fieldsToRead(Set<String> fields) {
+    if (fields != null) {
+      return fields;
+    }
+    return allFieldNames;
+  }
+
+  private String readJsonArrayValue(ResultSet resultSet, String field, ReadTiming timing) throws SQLException {
+    long fetchStartNs = System.nanoTime();
     String jsonValue = resultSet.getString(field);
+    long fetchNs = System.nanoTime() - fetchStartNs;
+    if (timing != null) {
+      timing.jsonFetchNs += fetchNs;
+      timing.fieldsRead++;
+      if (jsonValue != null) {
+        timing.resultBytesEstimate += jsonValue.length();
+      }
+    }
     if (jsonValue == null) {
       return null;
     }
-    return joinArrayValue(parseJsonArray(jsonValue));
+    long parseStartNs = System.nanoTime();
+    List<String> values = parseJsonArray(jsonValue);
+    long parseNs = System.nanoTime() - parseStartNs;
+    long joinStartNs = System.nanoTime();
+    String joined = joinArrayValue(values);
+    long joinNs = System.nanoTime() - joinStartNs;
+    if (timing != null) {
+      timing.jsonParseNs += parseNs;
+      timing.valueJoinNs += joinNs;
+    }
+    return joined;
   }
 
   private String joinArrayValue(List<String> values) {
@@ -820,6 +940,132 @@ public class JdbcDBClient extends DB {
       index++;
     }
     return index;
+  }
+
+  private static String emptyToNull(String value) {
+    if (value == null || value.trim().isEmpty()) {
+      return null;
+    }
+    return value;
+  }
+
+  private static long getLongProperty(Properties props, String key) throws DBException {
+    String valueStr = props.getProperty(key);
+    if (valueStr != null) {
+      try {
+        return Long.parseLong(valueStr);
+      } catch (NumberFormatException nfe) {
+        System.err.println("Invalid " + key + " specified: " + valueStr);
+        throw new DBException(nfe);
+      }
+    }
+    return -1;
+  }
+
+  private static long nanosToMicros(long nanos) {
+    return nanos / 1000L;
+  }
+
+  private void maybeLogReadSample(long operationIndex, String key, Status status, long totalReadUs,
+                                  ReadTiming timing) {
+    boolean logSample = readSampleFile != null && readSampleRate > 0 && operationIndex % readSampleRate == 0;
+    boolean logSlow = slowReadSampleFile != null && slowReadThresholdUs > 0 && totalReadUs >= slowReadThresholdUs;
+
+    if (logSample) {
+      appendReadSample(readSampleFile, operationIndex, key, status, totalReadUs, timing);
+    }
+    if (logSlow) {
+      appendReadSample(slowReadSampleFile, operationIndex, key, status, totalReadUs, timing);
+    }
+  }
+
+  private void ensureReadSampleHeader(String fileName) {
+    if (fileName == null) {
+      return;
+    }
+
+    synchronized (READ_SAMPLE_LOCK) {
+      File file = new File(fileName);
+      File parent = file.getParentFile();
+      if (parent != null && !parent.exists()) {
+        parent.mkdirs();
+      }
+      if (file.exists() && file.length() > 0) {
+        return;
+      }
+      try (FileWriter writer = new FileWriter(file, true)) {
+        writer.write("run_name,epoch,phase,timestamp_unix_ms,operation_index,ycsb_key,"
+            + "key_size_bytes,latency_us,status,thread_id,fields_read,result_bytes_estimate,"
+            + "query_execute_us,resultset_next_us,json_fetch_us,json_parse_us,value_join_us\n");
+      } catch (IOException ioe) {
+        System.err.println("Unable to write read sample header to " + fileName + ": " + ioe);
+      }
+    }
+  }
+
+  private void appendReadSample(String fileName, long operationIndex, String key, Status status,
+                                long totalReadUs, ReadTiming timing) {
+    if (fileName == null) {
+      return;
+    }
+
+    long timestampMs = System.currentTimeMillis();
+    long queryExecuteUs = nanosToMicros(timing.queryExecuteNs);
+    long resultSetNextUs = nanosToMicros(timing.resultSetNextNs);
+    long jsonFetchUs = nanosToMicros(timing.jsonFetchNs);
+    long jsonParseUs = nanosToMicros(timing.jsonParseNs);
+    long valueJoinUs = nanosToMicros(timing.valueJoinNs);
+    long keySizeBytes = timing.resultBytesEstimate;
+
+    StringBuilder line = new StringBuilder();
+    appendCsv(line, readSampleRunName).append(',');
+    appendCsv(line, readSampleEpoch).append(',');
+    appendCsv(line, readSamplePhase).append(',');
+    line.append(timestampMs).append(',');
+    line.append(operationIndex).append(',');
+    appendCsv(line, key).append(',');
+    line.append(keySizeBytes).append(',');
+    line.append(totalReadUs).append(',');
+    appendCsv(line, status.toString()).append(',');
+    line.append(Thread.currentThread().getId()).append(',');
+    line.append(timing.fieldsRead).append(',');
+    line.append(timing.resultBytesEstimate).append(',');
+    line.append(queryExecuteUs).append(',');
+    line.append(resultSetNextUs).append(',');
+    line.append(jsonFetchUs).append(',');
+    line.append(jsonParseUs).append(',');
+    line.append(valueJoinUs).append('\n');
+
+    synchronized (READ_SAMPLE_LOCK) {
+      try (FileWriter writer = new FileWriter(fileName, true)) {
+        writer.write(line.toString());
+      } catch (IOException ioe) {
+        System.err.println("Unable to append read sample to " + fileName + ": " + ioe);
+      }
+    }
+  }
+
+  private static StringBuilder appendCsv(StringBuilder builder, String value) {
+    if (value == null) {
+      return builder;
+    }
+    boolean quote = value.indexOf(',') >= 0 || value.indexOf('"') >= 0
+        || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0;
+    if (!quote) {
+      builder.append(value);
+      return builder;
+    }
+    builder.append('"');
+    for (int i = 0; i < value.length(); i++) {
+      char current = value.charAt(i);
+      if (current == '"') {
+        builder.append("\"\"");
+      } else {
+        builder.append(current);
+      }
+    }
+    builder.append('"');
+    return builder;
   }
 
   private void appendJsonString(StringBuilder builder, String value) {
