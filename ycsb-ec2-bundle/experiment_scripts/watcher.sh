@@ -19,14 +19,48 @@ fi
 DB_STATS_FILE=${DB_STATS_FILE:-$default_db_stats_file}
 PG_1S_FILE=${PG_1S_FILE:-}
 OS_1S_FILE=${OS_1S_FILE:-}
+OS_DISK_DEVICES=${OS_DISK_DEVICES:-auto}
+OS_DISK_DEVICE_FILE=${OS_DISK_DEVICE_FILE:-}
 
-prev_disk_ts_ms=""
-prev_disk_reads=""
-prev_disk_writes=""
-prev_disk_read_sectors=""
-prev_disk_write_sectors=""
-prev_disk_io_ms=""
-prev_disk_weighted_io_ms=""
+OS_DISK_SELECTION=""
+OS_DISK_SELECTION_LABEL=""
+OS_DISK_SELECTION_SOURCE=""
+OS_DISK_SELECTION_NOTE=""
+OS_DISK_TOTAL_DEVICES=""
+OS_DISK_TOTAL_LABEL=""
+OS_DISK_DATA_DIR=""
+OS_DISK_PGWAL_PATH=""
+OS_DISK_PGDATA_DF_SOURCE=""
+OS_DISK_PGDATA_DF_TYPE=""
+OS_DISK_PGDATA_DF_MOUNT=""
+OS_DISK_PGWAL_DF_SOURCE=""
+OS_DISK_PGWAL_DF_TYPE=""
+OS_DISK_PGWAL_DF_MOUNT=""
+
+prev_selected_disk_ts_ms=""
+prev_selected_disk_reads=""
+prev_selected_disk_writes=""
+prev_selected_disk_read_sectors=""
+prev_selected_disk_write_sectors=""
+prev_selected_disk_io_ms=""
+prev_selected_disk_weighted_io_ms=""
+prev_total_disk_ts_ms=""
+prev_total_disk_reads=""
+prev_total_disk_writes=""
+prev_total_disk_read_sectors=""
+prev_total_disk_write_sectors=""
+prev_total_disk_io_ms=""
+prev_total_disk_weighted_io_ms=""
+
+csv_escape() {
+    local value="${1:-}"
+    value=${value//\"/\"\"}
+    if [[ "$value" == *","* || "$value" == *$'\n'* || "$value" == *$'\r'* || "$value" == *"\""* ]]; then
+        printf '"%s"' "$value"
+    else
+        printf '%s' "$value"
+    fi
+}
 
 null_csv() {
     local count="$1"
@@ -94,8 +128,26 @@ write_os_1s_header() {
     {
         printf 'DBName,Phase,Epoch,TimestampUnixMs'
         printf ',postgres_cpu_pct,postgres_rss_kb,mem_available_kb,mem_dirty_kb,mem_writeback_kb'
-        printf ',disk_reads_s,disk_writes_s,disk_read_kb_s,disk_write_kb_s,disk_await_ms,disk_aqu_sz,disk_util_pct\n'
+        printf ',disk_reads_s,disk_writes_s,disk_read_kb_s,disk_write_kb_s,disk_await_ms,disk_aqu_sz,disk_util_pct'
+        printf ',disk_device_set,disk_device_source'
+        printf ',total_disk_reads_s,total_disk_writes_s,total_disk_read_kb_s,total_disk_write_kb_s,total_disk_await_ms,total_disk_aqu_sz,total_disk_util_pct\n'
     } > "$OS_1S_FILE"
+}
+
+write_os_disk_device_header() {
+    if [ -z "$OS_DISK_DEVICE_FILE" ] || [ -f "$OS_DISK_DEVICE_FILE" ]; then
+        return
+    fi
+
+    mkdir -p "$(dirname "$OS_DISK_DEVICE_FILE")"
+    {
+        printf 'DBName,Phase,Epoch,TimestampUnixMs'
+        printf ',selection_source,selected_devices,total_devices'
+        printf ',data_directory,pgdata_df_source,pgdata_df_type,pgdata_df_mount'
+        printf ',pgwal_path,pgwal_df_source,pgwal_df_type,pgwal_df_mount'
+        printf ',selected_read_ios,selected_write_ios,selected_read_sectors,selected_write_sectors,selected_io_ms,selected_weighted_io_ms'
+        printf ',available_proc_devices,note\n'
+    } > "$OS_DISK_DEVICE_FILE"
 }
 
 collect_db_stats() {
@@ -219,34 +271,321 @@ collect_disk_totals() {
     ' /proc/diskstats
 }
 
-collect_disk_rates() {
+disk_device_exists() {
+    local device="$1"
+    awk -v dev="$device" '$3 == dev {found = 1} END {exit found ? 0 : 1}' /proc/diskstats
+}
+
+all_disk_devices() {
+    local path device
+
+    if [ -d /sys/block ]; then
+        for path in /sys/block/*; do
+            [ -e "$path" ] || continue
+            device=$(basename "$path")
+            case "$device" in
+                loop*|ram*|fd*|sr*) continue ;;
+            esac
+            disk_device_exists "$device" && printf '%s\n' "$device"
+        done | sort -u
+        return
+    fi
+
+    awk '$3 !~ /^(loop|ram|fd|sr)/ {print $3}' /proc/diskstats | sort -u
+}
+
+diskstats_device_inventory() {
+    awk '$3 !~ /^(loop|ram|fd|sr)/ {print $3}' /proc/diskstats | sort -u | paste -sd'|' -
+}
+
+disk_label() {
+    printf '%s' "$1" | tr ' ' '|'
+}
+
+add_disk_device() {
+    local current="$1"
+    local device="$2"
+
+    [ -z "$device" ] && {
+        printf '%s' "$current"
+        return
+    }
+
+    case " $current " in
+        *" $device "*) printf '%s' "$current" ;;
+        *) printf '%s' "${current:+$current }$device" ;;
+    esac
+}
+
+df_path_info() {
+    local path="$1"
+
+    if [ -z "$path" ] || [ ! -e "$path" ]; then
+        printf '\t\t'
+        return
+    fi
+
+    df -P -T "$path" 2>/dev/null | awk 'NR == 2 {print $1 "\t" $2 "\t" $7}'
+}
+
+device_for_path() {
+    local path="$1"
+    local row source resolved device
+
+    row=$(df_path_info "$path")
+    IFS=$'\t' read -r source _ <<< "$row"
+
+    if [[ "$source" == /dev/* ]]; then
+        resolved=$(readlink -f "$source" 2>/dev/null || printf '%s' "$source")
+        device=$(basename "$resolved")
+        if disk_device_exists "$device"; then
+            printf '%s' "$device"
+            return
+        fi
+
+        device=$(basename "$source")
+        if disk_device_exists "$device"; then
+            printf '%s' "$device"
+            return
+        fi
+    fi
+
+    printf ''
+}
+
+postgres_data_dir_from_proc() {
+    local cmdline data_dir
+
+    for cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "$cmdline" ] || continue
+        data_dir=$(awk -v RS='\0' '
+            NR == 1 {
+                is_postgres = ($0 ~ /(^|\/)postgres$/)
+            }
+            !is_postgres {
+                next
+            }
+            want_next {
+                print
+                exit
+            }
+            $0 == "-D" {
+                want_next = 1
+                next
+            }
+            $0 ~ /^-D.+/ {
+                print substr($0, 3)
+                exit
+            }
+        ' "$cmdline" 2>/dev/null)
+
+        if [ -n "$data_dir" ] && [ -d "$data_dir" ]; then
+            printf '%s' "$data_dir"
+            return
+        fi
+    done
+}
+
+normalize_requested_disk_devices() {
+    local requested="$1"
+    local token resolved device devices missing
+
+    requested=${requested//,/ }
+    devices=""
+    missing=""
+    for token in $requested; do
+        resolved=$(readlink -f "$token" 2>/dev/null || printf '%s' "$token")
+        device=${resolved#/dev/}
+        device=$(basename "$device")
+        if disk_device_exists "$device"; then
+            devices=$(add_disk_device "$devices" "$device")
+        else
+            missing=$(add_disk_device "$missing" "$device")
+        fi
+    done
+
+    if [ -n "$missing" ]; then
+        OS_DISK_SELECTION_NOTE="${OS_DISK_SELECTION_NOTE:+$OS_DISK_SELECTION_NOTE; }requested device(s) not in /proc/diskstats: $(disk_label "$missing")"
+    fi
+
+    printf '%s' "$devices"
+}
+
+collect_disk_totals_for_devices() {
+    local devices="$1"
+
+    if [ -z "$devices" ]; then
+        printf 'NULL,NULL,NULL,NULL,NULL,NULL'
+        return
+    fi
+
+    awk -v devices="$devices" '
+        BEGIN {
+            split(devices, devs, " ")
+            for (i in devs) {
+                if (devs[i] != "") {
+                    wanted[devs[i]] = 1
+                }
+            }
+        }
+        $3 in wanted {
+            seen = 1
+            reads += $4
+            read_sectors += $6
+            writes += $8
+            write_sectors += $10
+            io_ms += $13
+            weighted_io_ms += $14
+        }
+        END {
+            if (!seen) {
+                printf "NULL,NULL,NULL,NULL,NULL,NULL"
+            } else {
+                printf "%d,%d,%d,%d,%d,%d", reads, writes, read_sectors, write_sectors, io_ms, weighted_io_ms
+            }
+        }
+    ' /proc/diskstats
+}
+
+init_disk_device_selection() {
+    local pgdata_row pgwal_row pgdata_device pgwal_device total_devices
+
+    OS_DISK_TOTAL_DEVICES=$(all_disk_devices | paste -sd' ' -)
+    OS_DISK_TOTAL_LABEL=$(disk_label "$OS_DISK_TOTAL_DEVICES")
+
+    OS_DISK_DATA_DIR=$(psql_csv postgres "SELECT current_setting('data_directory', true);")
+    if [ -z "$OS_DISK_DATA_DIR" ]; then
+        OS_DISK_DATA_DIR=$(postgres_data_dir_from_proc)
+        if [ -n "$OS_DISK_DATA_DIR" ]; then
+            OS_DISK_SELECTION_NOTE="${OS_DISK_SELECTION_NOTE:+$OS_DISK_SELECTION_NOTE; }data_directory from local postgres -D process argument"
+        fi
+    fi
+
+    if [ -n "$OS_DISK_DATA_DIR" ]; then
+        IFS=$'\t' read -r OS_DISK_PGDATA_DF_SOURCE OS_DISK_PGDATA_DF_TYPE OS_DISK_PGDATA_DF_MOUNT <<< "$(df_path_info "$OS_DISK_DATA_DIR")"
+        pgdata_device=$(device_for_path "$OS_DISK_DATA_DIR")
+
+        OS_DISK_PGWAL_PATH=$(readlink -f "$OS_DISK_DATA_DIR/pg_wal" 2>/dev/null || printf '%s' "$OS_DISK_DATA_DIR/pg_wal")
+        IFS=$'\t' read -r OS_DISK_PGWAL_DF_SOURCE OS_DISK_PGWAL_DF_TYPE OS_DISK_PGWAL_DF_MOUNT <<< "$(df_path_info "$OS_DISK_PGWAL_PATH")"
+        pgwal_device=$(device_for_path "$OS_DISK_PGWAL_PATH")
+    fi
+
+    case "$OS_DISK_DEVICES" in
+        auto|"")
+            OS_DISK_SELECTION=""
+            OS_DISK_SELECTION=$(add_disk_device "$OS_DISK_SELECTION" "$pgdata_device")
+            OS_DISK_SELECTION=$(add_disk_device "$OS_DISK_SELECTION" "$pgwal_device")
+            OS_DISK_SELECTION_SOURCE="auto_pgdata_pgwal"
+            if [ -z "$OS_DISK_SELECTION" ]; then
+                OS_DISK_SELECTION="$OS_DISK_TOTAL_DEVICES"
+                OS_DISK_SELECTION_SOURCE="auto_all_fallback"
+                OS_DISK_SELECTION_NOTE="${OS_DISK_SELECTION_NOTE:+$OS_DISK_SELECTION_NOTE; }could not map PostgreSQL data/WAL path to a block device"
+            fi
+            ;;
+        all)
+            OS_DISK_SELECTION="$OS_DISK_TOTAL_DEVICES"
+            OS_DISK_SELECTION_SOURCE="requested_all"
+            ;;
+        *)
+            OS_DISK_SELECTION=$(normalize_requested_disk_devices "$OS_DISK_DEVICES")
+            OS_DISK_SELECTION_SOURCE="requested"
+            if [ -z "$OS_DISK_SELECTION" ]; then
+                OS_DISK_SELECTION="$OS_DISK_TOTAL_DEVICES"
+                OS_DISK_SELECTION_SOURCE="requested_invalid_all_fallback"
+            fi
+            ;;
+    esac
+
+    OS_DISK_SELECTION_LABEL=$(disk_label "$OS_DISK_SELECTION")
+    total_devices=$(disk_label "$OS_DISK_TOTAL_DEVICES")
+    [ -z "$total_devices" ] && OS_DISK_SELECTION_NOTE="${OS_DISK_SELECTION_NOTE:+$OS_DISK_SELECTION_NOTE; }no non-loop block devices found in /sys/block"
+}
+
+record_disk_device_selection() {
+    if [ -z "$OS_DISK_DEVICE_FILE" ]; then
+        return
+    fi
+
+    local ts_ms selected_totals inventory
+    ts_ms=$(date +%s%3N)
+    selected_totals=$(collect_disk_totals_for_devices "$OS_DISK_SELECTION")
+    inventory=$(diskstats_device_inventory)
+
+    {
+        csv_escape "$db_name"; printf ','
+        csv_escape "$phase"; printf ','
+        csv_escape "$epoch"; printf ','
+        printf '%s,' "$ts_ms"
+        csv_escape "$OS_DISK_SELECTION_SOURCE"; printf ','
+        csv_escape "$OS_DISK_SELECTION_LABEL"; printf ','
+        csv_escape "$OS_DISK_TOTAL_LABEL"; printf ','
+        csv_escape "$OS_DISK_DATA_DIR"; printf ','
+        csv_escape "$OS_DISK_PGDATA_DF_SOURCE"; printf ','
+        csv_escape "$OS_DISK_PGDATA_DF_TYPE"; printf ','
+        csv_escape "$OS_DISK_PGDATA_DF_MOUNT"; printf ','
+        csv_escape "$OS_DISK_PGWAL_PATH"; printf ','
+        csv_escape "$OS_DISK_PGWAL_DF_SOURCE"; printf ','
+        csv_escape "$OS_DISK_PGWAL_DF_TYPE"; printf ','
+        csv_escape "$OS_DISK_PGWAL_DF_MOUNT"; printf ','
+        printf '%s,' "$selected_totals"
+        csv_escape "$inventory"; printf ','
+        csv_escape "$OS_DISK_SELECTION_NOTE"; printf '\n'
+    } >> "$OS_DISK_DEVICE_FILE"
+}
+
+collect_disk_rates_for_devices() {
+    local devices="$1"
+    local scope="$2"
     local now_ms totals reads writes read_sectors write_sectors io_ms weighted_io_ms
     local elapsed_ms delta_reads delta_writes delta_read_sectors delta_write_sectors delta_io_ms delta_weighted_io_ms
+    local prev_ts_var prev_reads_var prev_writes_var prev_read_sectors_var prev_write_sectors_var prev_io_ms_var prev_weighted_io_ms_var
+    local prev_ts prev_reads prev_writes prev_read_sectors prev_write_sectors prev_io_ms prev_weighted_io_ms
 
     now_ms=$(date +%s%3N)
-    totals=$(collect_disk_totals)
+    totals=$(collect_disk_totals_for_devices "$devices")
     IFS=, read -r reads writes read_sectors write_sectors io_ms weighted_io_ms <<< "$totals"
 
-    if [ -z "$prev_disk_ts_ms" ]; then
-        prev_disk_ts_ms="$now_ms"
-        prev_disk_reads="$reads"
-        prev_disk_writes="$writes"
-        prev_disk_read_sectors="$read_sectors"
-        prev_disk_write_sectors="$write_sectors"
-        prev_disk_io_ms="$io_ms"
-        prev_disk_weighted_io_ms="$weighted_io_ms"
+    if [ -z "$totals" ] || [ "$reads" = "NULL" ]; then
+        printf 'NULL,NULL,NULL,NULL,NULL,NULL,NULL'
+        return
+    fi
+
+    prev_ts_var="prev_${scope}_disk_ts_ms"
+    prev_reads_var="prev_${scope}_disk_reads"
+    prev_writes_var="prev_${scope}_disk_writes"
+    prev_read_sectors_var="prev_${scope}_disk_read_sectors"
+    prev_write_sectors_var="prev_${scope}_disk_write_sectors"
+    prev_io_ms_var="prev_${scope}_disk_io_ms"
+    prev_weighted_io_ms_var="prev_${scope}_disk_weighted_io_ms"
+
+    prev_ts="${!prev_ts_var}"
+    prev_reads="${!prev_reads_var}"
+    prev_writes="${!prev_writes_var}"
+    prev_read_sectors="${!prev_read_sectors_var}"
+    prev_write_sectors="${!prev_write_sectors_var}"
+    prev_io_ms="${!prev_io_ms_var}"
+    prev_weighted_io_ms="${!prev_weighted_io_ms_var}"
+
+    if [ -z "$prev_ts" ]; then
+        printf -v "$prev_ts_var" '%s' "$now_ms"
+        printf -v "$prev_reads_var" '%s' "$reads"
+        printf -v "$prev_writes_var" '%s' "$writes"
+        printf -v "$prev_read_sectors_var" '%s' "$read_sectors"
+        printf -v "$prev_write_sectors_var" '%s' "$write_sectors"
+        printf -v "$prev_io_ms_var" '%s' "$io_ms"
+        printf -v "$prev_weighted_io_ms_var" '%s' "$weighted_io_ms"
         printf '0,0,0,0,0,0,0'
         return
     fi
 
-    elapsed_ms=$((now_ms - prev_disk_ts_ms))
+    elapsed_ms=$((now_ms - prev_ts))
     [ "$elapsed_ms" -le 0 ] && elapsed_ms=1
-    delta_reads=$((reads - prev_disk_reads))
-    delta_writes=$((writes - prev_disk_writes))
-    delta_read_sectors=$((read_sectors - prev_disk_read_sectors))
-    delta_write_sectors=$((write_sectors - prev_disk_write_sectors))
-    delta_io_ms=$((io_ms - prev_disk_io_ms))
-    delta_weighted_io_ms=$((weighted_io_ms - prev_disk_weighted_io_ms))
+    delta_reads=$((reads - prev_reads))
+    delta_writes=$((writes - prev_writes))
+    delta_read_sectors=$((read_sectors - prev_read_sectors))
+    delta_write_sectors=$((write_sectors - prev_write_sectors))
+    delta_io_ms=$((io_ms - prev_io_ms))
+    delta_weighted_io_ms=$((weighted_io_ms - prev_weighted_io_ms))
 
     [ "$delta_reads" -lt 0 ] && delta_reads=0
     [ "$delta_writes" -lt 0 ] && delta_writes=0
@@ -276,13 +615,13 @@ collect_disk_rates() {
             printf "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f", reads_s, writes_s, read_kb_s, write_kb_s, await_ms, aqu_sz, util_pct
         }'
 
-    prev_disk_ts_ms="$now_ms"
-    prev_disk_reads="$reads"
-    prev_disk_writes="$writes"
-    prev_disk_read_sectors="$read_sectors"
-    prev_disk_write_sectors="$write_sectors"
-    prev_disk_io_ms="$io_ms"
-    prev_disk_weighted_io_ms="$weighted_io_ms"
+    printf -v "$prev_ts_var" '%s' "$now_ms"
+    printf -v "$prev_reads_var" '%s' "$reads"
+    printf -v "$prev_writes_var" '%s' "$writes"
+    printf -v "$prev_read_sectors_var" '%s' "$read_sectors"
+    printf -v "$prev_write_sectors_var" '%s' "$write_sectors"
+    printf -v "$prev_io_ms_var" '%s' "$io_ms"
+    printf -v "$prev_weighted_io_ms_var" '%s' "$weighted_io_ms"
 }
 
 collect_pg_io_totals() {
@@ -358,6 +697,9 @@ is_integer() {
 write_db_stats_header
 write_pg_1s_header
 write_os_1s_header
+write_os_disk_device_header
+init_disk_device_selection
+record_disk_device_selection
 
 if [ "${ONESHOT_DBSTATS:-0}" = "1" ]; then
     ts=$(date +%s)
@@ -421,7 +763,9 @@ while true; do
         echo "$db_name,$phase,$epoch,$ts_ms,$(collect_db_stats),$(collect_wait_stats)" >> "$PG_1S_FILE"
     fi
     if [ -n "$OS_1S_FILE" ]; then
-        echo "$db_name,$phase,$epoch,$ts_ms,$cpu,$mem_kb,$(collect_meminfo),$(collect_disk_rates)" >> "$OS_1S_FILE"
+        selected_disk_rates=$(collect_disk_rates_for_devices "$OS_DISK_SELECTION" "selected")
+        total_disk_rates=$(collect_disk_rates_for_devices "$OS_DISK_TOTAL_DEVICES" "total")
+        echo "$db_name,$phase,$epoch,$ts_ms,$cpu,$mem_kb,$(collect_meminfo),$selected_disk_rates,$OS_DISK_SELECTION_LABEL,$OS_DISK_SELECTION_SOURCE,$total_disk_rates" >> "$OS_1S_FILE"
     fi
     if [ "$DB_STATS_INTERVAL" -gt 0 ] && [ $((ts - last_db_stats)) -ge "$DB_STATS_INTERVAL" ]; then
         echo "$phase,$epoch,$ts,$(collect_db_stats)" >> "$DB_STATS_FILE"

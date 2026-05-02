@@ -60,21 +60,30 @@ DETOAST_PROBE_LOG="${INTERNAL_DATA_DIR}/${TYPE}_run${RUN}_${DIST}_${SCALE}_${WOR
 DETOAST_PROBE_ENABLED=${DETOAST_PROBE_ENABLED:-1}
 DETOAST_PROBE_EVERY=${DETOAST_PROBE_EVERY:-1}
 DB_STATS_INTERVAL=${DB_STATS_INTERVAL:-60}
+OS_DISK_DEVICES="${OS_DISK_DEVICES:-auto}"
 SPIKE_TRIGGER_TRACE_ENABLED=${SPIKE_TRIGGER_TRACE_ENABLED:-1}
 SPIKE_TRIGGER_READ_SAMPLE_RATE=${SPIKE_TRIGGER_READ_SAMPLE_RATE:-100}
 SPIKE_TRIGGER_SLOW_READ_US=${SPIKE_TRIGGER_SLOW_READ_US:-1000}
+SPIKE_TRIGGER_BUFFER_PROGRESS_PCTS="${SPIKE_TRIGGER_BUFFER_PROGRESS_PCTS:-10 25 50}"
+SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED=${SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED:-1}
+SPIKE_TRIGGER_CHECKPOINT_LOG_TAIL_LINES=${SPIKE_TRIGGER_CHECKPOINT_LOG_TAIL_LINES:-5000}
 RUN_NAME="${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}"
 TRIGGER_DATA_DIR="${INTERNAL_DATA_DIR}/toast_spike_trigger"
 PHASE_TIMELINE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_phase_timeline.csv"
 PG_1S_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_pg_1s.csv"
 OS_1S_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_os_1s.csv"
+OS_DISK_DEVICE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_os_disk_devices.csv"
 CHECKPOINT_OBSERVATIONS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_checkpoint_observations.csv"
+CHECKPOINT_LOG_SETTINGS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_checkpoint_log_settings.csv"
+CHECKPOINT_LOG_MESSAGES_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_checkpoint_log_messages.csv"
+CHECKPOINT_LOG_SEEN_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_checkpoint_log_messages.seen"
 VACUUM_PROGRESS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_vacuum_progress_1s.csv"
 BUFFER_RESIDENCY_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_buffer_residency.csv"
 READ_SAMPLE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_read_sample.csv"
 SLOW_READ_SAMPLE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_slow_read_sample.csv"
 SAMPLED_DETOAST_PROBE_LOG="${TRIGGER_DATA_DIR}/${RUN_NAME}_detoast_probe_sampled_keys.log"
 YCSB_READ_SAMPLE_ARGS=()
+TRACE_START_EPOCH_SECONDS=""
 
 # Extend phase experiment parameters
 extendproportion_extend="1"
@@ -106,6 +115,225 @@ extendoperationcount="${EXTEND_OPERATIONCOUNT:-100000}"
 # Function to log and print messages
 log() {
     echo "$1" | tee -a $LOG_FILE
+}
+
+postgres_setting_row() {
+    local query="$1"
+    local row
+
+    row=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -X -q -t -A -F $'\t' \
+        -U "$PG_EXTENSION_USERNAME" -d postgres \
+        -c "$query" 2>/dev/null | sed '/^[[:space:]]*$/d' || true)
+
+    if [ -z "$row" ]; then
+        row=$(PGPASSWORD="$DB_PWD" psql -X -q -t -A -F $'\t' \
+            -U "$DB_USERNAME" -d postgres \
+            -c "$query" 2>/dev/null | sed '/^[[:space:]]*$/d' || true)
+    fi
+
+    printf '%s\n' "$row"
+}
+
+postgres_log_file_candidates() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local row data_dir log_dir logging_collector log_destination candidate_dir
+
+    row=$(postgres_setting_row "SELECT current_setting('data_directory', true), current_setting('log_directory', true), current_setting('logging_collector', true), current_setting('log_destination', true);")
+    IFS=$'\t' read -r data_dir log_dir logging_collector log_destination <<< "$row"
+
+    {
+        if [ -n "$log_dir" ]; then
+            if [[ "$log_dir" == /* ]]; then
+                candidate_dir="$log_dir"
+            elif [ -n "$data_dir" ]; then
+                candidate_dir="${data_dir%/}/$log_dir"
+            else
+                candidate_dir=""
+            fi
+
+            if [ -n "$candidate_dir" ] && [ -d "$candidate_dir" ]; then
+                find "$candidate_dir" -maxdepth 1 -type f \
+                    \( -name "*.log" -o -name "*.csv" \) \
+                    -printf "%T@ %p\n" 2>/dev/null \
+                    | sort -rn \
+                    | head -20 \
+                    | sed 's/^[^ ]* //'
+            fi
+        fi
+
+        if [ -d /var/log/postgresql ]; then
+            find /var/log/postgresql -maxdepth 1 -type f -name "*.log" \
+                -printf "%T@ %p\n" 2>/dev/null \
+                | sort -rn \
+                | head -20 \
+                | sed 's/^[^ ]* //'
+        fi
+    } | sort -u
+}
+
+record_checkpoint_log_settings() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local event_label="$1"
+    local ts_ms rows setting_name setting_value log_source
+
+    ts_ms=$(timestamp_ms)
+    rows=$(postgres_setting_row "
+        SELECT name, setting
+        FROM pg_settings
+        WHERE name IN (
+            'data_directory',
+            'log_checkpoints',
+            'log_destination',
+            'log_directory',
+            'log_filename',
+            'log_line_prefix',
+            'logging_collector'
+        )
+        ORDER BY name;
+    ")
+
+    if [ -z "$rows" ]; then
+        {
+            csv_escape "$RUN_NAME"; printf ','
+            csv_escape "$event_label"; printf ','
+            printf '%s,' "$ts_ms"
+            csv_escape "pg_settings_unavailable"; printf ','
+            csv_escape "NULL"; printf '\n'
+        } >> "$CHECKPOINT_LOG_SETTINGS_FILE"
+    else
+        while IFS=$'\t' read -r setting_name setting_value; do
+            [ -z "$setting_name" ] && continue
+            {
+                csv_escape "$RUN_NAME"; printf ','
+                csv_escape "$event_label"; printf ','
+                printf '%s,' "$ts_ms"
+                csv_escape "$setting_name"; printf ','
+                csv_escape "$setting_value"; printf '\n'
+            } >> "$CHECKPOINT_LOG_SETTINGS_FILE"
+        done <<< "$rows"
+    fi
+
+    while IFS= read -r log_source; do
+        [ -z "$log_source" ] && continue
+        {
+            csv_escape "$RUN_NAME"; printf ','
+            csv_escape "$event_label"; printf ','
+            printf '%s,' "$ts_ms"
+            csv_escape "postgres_log_file"; printf ','
+            csv_escape "$log_source"; printf '\n'
+        } >> "$CHECKPOINT_LOG_SETTINGS_FILE"
+    done < <(postgres_log_file_candidates)
+}
+
+record_checkpoint_log_message_row() {
+    local phase_label="$1"
+    local epoch_label="$2"
+    local event_label="$3"
+    local source_label="$4"
+    local message="$5"
+    local key ts_ms
+
+    key="${source_label}"$'\t'"${message}"
+    if [ -f "$CHECKPOINT_LOG_SEEN_FILE" ] && grep -Fqx -- "$key" "$CHECKPOINT_LOG_SEEN_FILE" 2>/dev/null; then
+        return 1
+    fi
+
+    printf '%s\n' "$key" >> "$CHECKPOINT_LOG_SEEN_FILE"
+    ts_ms=$(timestamp_ms)
+    {
+        csv_escape "$RUN_NAME"; printf ','
+        csv_escape "$epoch_label"; printf ','
+        csv_escape "$phase_label"; printf ','
+        csv_escape "$event_label"; printf ','
+        printf '%s,' "$ts_ms"
+        csv_escape "$source_label"; printf ','
+        csv_escape "$message"; printf '\n'
+    } >> "$CHECKPOINT_LOG_MESSAGES_FILE"
+    return 0
+}
+
+collect_checkpoint_log_messages() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local phase_label="$1"
+    local epoch_label="$2"
+    local event_label="$3"
+    local source_path raw_line saw_source saw_message
+    local checkpoint_pattern='checkpoint (starting|complete|skipped)|restartpoint (starting|complete|skipped)|checkpoints are occurring too frequently'
+
+    saw_source=0
+    saw_message=0
+    touch "$CHECKPOINT_LOG_SEEN_FILE" 2>/dev/null || true
+
+    while IFS= read -r source_path; do
+        [ -z "$source_path" ] && continue
+        saw_source=1
+        while IFS= read -r raw_line; do
+            [ -z "$raw_line" ] && continue
+            if record_checkpoint_log_message_row "$phase_label" "$epoch_label" "$event_label" "$source_path" "$raw_line"; then
+                saw_message=1
+            fi
+        done < <(tail -n "$SPIKE_TRIGGER_CHECKPOINT_LOG_TAIL_LINES" "$source_path" 2>/dev/null | grep -Ei "$checkpoint_pattern" || true)
+    done < <(postgres_log_file_candidates)
+
+    if command -v journalctl >/dev/null 2>&1 && [ -n "${TRACE_START_EPOCH_SECONDS:-}" ]; then
+        while IFS= read -r raw_line; do
+            [ -z "$raw_line" ] && continue
+            if record_checkpoint_log_message_row "$phase_label" "$epoch_label" "$event_label" "journalctl:_COMM=postgres" "$raw_line"; then
+                saw_message=1
+            fi
+        done < <(journalctl --since "@$TRACE_START_EPOCH_SECONDS" --no-pager -o short-iso _COMM=postgres 2>/dev/null | grep -Ei "$checkpoint_pattern" || true)
+    fi
+
+    if [ "$saw_source" -eq 0 ] && [ "$saw_message" -eq 0 ]; then
+        record_checkpoint_log_message_row "$phase_label" "$epoch_label" "$event_label" "checkpoint_log_unavailable" "No readable PostgreSQL log file or journal checkpoint message found; see checkpoint_log_settings for server log configuration." >/dev/null || true
+    fi
+}
+
+ensure_checkpoint_logging() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local current_setting
+
+    current_setting=$(postgres_setting_row "SHOW log_checkpoints;" | head -1)
+    if [ "$current_setting" != "on" ]; then
+        if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+            -U "$PG_EXTENSION_USERNAME" -d postgres \
+            -c "ALTER SYSTEM SET log_checkpoints = 'on';" >/dev/null 2>&1
+        then
+            log "Warning: could not enable PostgreSQL log_checkpoints with PG_EXTENSION_USERNAME=$PG_EXTENSION_USERNAME. Set PG_EXTENSION_USERNAME/PG_EXTENSION_PWD to a role that can ALTER SYSTEM, or enable log_checkpoints manually."
+            record_checkpoint_log_settings "enable_log_checkpoints_failed"
+            collect_checkpoint_log_messages "experiment" "0" "enable_log_checkpoints_failed"
+            return
+        fi
+
+        if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+            -U "$PG_EXTENSION_USERNAME" -d postgres \
+            -c "SELECT pg_reload_conf();" >/dev/null 2>&1
+        then
+            log "Warning: ALTER SYSTEM SET log_checkpoints succeeded, but pg_reload_conf() failed."
+        fi
+    fi
+
+    current_setting=$(postgres_setting_row "SHOW log_checkpoints;" | head -1)
+    if [ "$current_setting" != "on" ]; then
+        log "Warning: PostgreSQL log_checkpoints is still '$current_setting' after reload; checkpoint log messages may be missing."
+    else
+        log "PostgreSQL log_checkpoints is enabled for checkpoint message capture."
+    fi
+
+    record_checkpoint_log_settings "after_enable_log_checkpoints"
+    collect_checkpoint_log_messages "experiment" "0" "after_enable_log_checkpoints"
 }
 
 ensure_pg_buffercache_extension() {
@@ -178,6 +406,13 @@ init_spike_trigger_trace() {
         echo "run_name,epoch,phase,event,timestamp_unix_ms,checkpoints_timed,checkpoints_req,checkpoint_write_time,checkpoint_sync_time,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,wal_bytes,wal_records"
     } > "$CHECKPOINT_OBSERVATIONS_FILE"
     {
+        echo "run_name,event,timestamp_unix_ms,name,setting"
+    } > "$CHECKPOINT_LOG_SETTINGS_FILE"
+    {
+        echo "run_name,epoch,phase,event,observed_timestamp_unix_ms,source,message"
+    } > "$CHECKPOINT_LOG_MESSAGES_FILE"
+    > "$CHECKPOINT_LOG_SEEN_FILE"
+    {
         echo "run_name,epoch,timestamp_unix_ms,relation,phase,heap_blks_total,heap_blks_scanned,heap_blks_vacuumed,index_vacuum_count,max_dead_tuples,num_dead_tuples"
     } > "$VACUUM_PROGRESS_FILE"
     {
@@ -186,6 +421,8 @@ init_spike_trigger_trace() {
     {
         echo "run_name,epoch,phase,timestamp_unix_ms,probe_label,ycsb_key,size_bytes"
     } > "$SAMPLED_DETOAST_PROBE_LOG"
+
+    TRACE_START_EPOCH_SECONDS=$(date +%s)
 }
 
 record_phase_event() {
@@ -243,6 +480,7 @@ record_checkpoint_observation() {
 
     [ -z "$row" ] && row="NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL"
     echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,$row" >> "$CHECKPOINT_OBSERVATIONS_FILE"
+    collect_checkpoint_log_messages "$phase_label" "$epoch_label" "$event_label"
 }
 
 record_buffer_residency() {
@@ -353,6 +591,89 @@ stop_background_pid() {
     fi
 }
 
+wait_background_pid_with_timeout() {
+    local pid="${1:-}"
+    local timeout_seconds="${2:-5}"
+    local waited=0
+
+    if [ -z "$pid" ]; then
+        return
+    fi
+
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$timeout_seconds" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+
+start_run_buffer_progress_sampler() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
+        echo ""
+        return
+    fi
+    if [ "${SPIKE_TRIGGER_READ_SAMPLE_RATE:-0}" -le 0 ]; then
+        echo ""
+        return
+    fi
+
+    local db_name="$1"
+    local epoch_label="$2"
+    local operation_count="$3"
+
+    if ! [[ "$operation_count" =~ ^[0-9]+$ ]] || [ "$operation_count" -le 0 ]; then
+        echo ""
+        return
+    fi
+
+    (
+        declare -A recorded=()
+        local pct target max_op all_recorded
+
+        while true; do
+            if [ -f "$READ_SAMPLE_FILE" ]; then
+                max_op=$(awk -F, -v ep="$epoch_label" '
+                    NR > 1 && $2 == ep && $3 == "run" {
+                        op = $5 + 0
+                        if (op > max) {
+                            max = op
+                        }
+                    }
+                    END {
+                        print max + 0
+                    }
+                ' "$READ_SAMPLE_FILE" 2>/dev/null)
+            else
+                max_op=0
+            fi
+
+            all_recorded=1
+            for pct in $SPIKE_TRIGGER_BUFFER_PROGRESS_PCTS; do
+                if ! [[ "$pct" =~ ^[0-9]+$ ]] || [ "$pct" -le 0 ] || [ "$pct" -ge 100 ]; then
+                    continue
+                fi
+
+                target=$((operation_count * pct / 100))
+                [ "$target" -lt 1 ] && target=1
+
+                if [ -z "${recorded[$pct]:-}" ]; then
+                    all_recorded=0
+                    if [ "$max_op" -ge "$target" ]; then
+                        record_buffer_residency "$db_name" "run" "$epoch_label" "run_progress_${pct}pct"
+                        recorded[$pct]=1
+                    fi
+                fi
+            done
+
+            if [ "$all_recorded" -eq 1 ]; then
+                break
+            fi
+
+            sleep 1
+        done
+    ) >/dev/null 2>&1 &
+    echo "$!"
+}
+
 set_read_sample_args() {
     local phase_label="$1"
     local epoch_label="$2"
@@ -382,6 +703,8 @@ run_with_metrics() {
     local output_csv=$4
     local pg_1s_file=""
     local os_1s_file=""
+    local run_buffer_sampler_pid=""
+    local operation_count=""
 
     shift 4
 
@@ -409,16 +732,27 @@ run_with_metrics() {
         DB_STATS_FILE="$db_stats_file" \
         PG_1S_FILE="$pg_1s_file" \
         OS_1S_FILE="$os_1s_file" \
+        OS_DISK_DEVICE_FILE="$OS_DISK_DEVICE_FILE" \
+        OS_DISK_DEVICES="$OS_DISK_DEVICES" \
         DB_STATS_TABLE="usertable" \
         DB_STATS_INTERVAL="$DB_STATS_INTERVAL" \
         INTERVAL=1 \
         ./watcher.sh &
     watcher_pid=$!
 
-    trap "kill -TERM -$watcher_pid 2>/dev/null" EXIT INT TERM
+    if [ "$phase" = "run" ] && [ "$SPIKE_TRIGGER_TRACE_ENABLED" = "1" ]; then
+        operation_count=$(grep -E '^operationcount=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
+        run_buffer_sampler_pid=$(start_run_buffer_progress_sampler "$db_name" "$epoch" "$operation_count")
+    fi
+
+    trap 'kill -TERM -$watcher_pid 2>/dev/null; stop_background_pid "$run_buffer_sampler_pid"' EXIT INT TERM
 
     "$@" > "$output_csv"
     status=$?
+
+    wait_background_pid_with_timeout "$run_buffer_sampler_pid" 5
+    stop_background_pid "$run_buffer_sampler_pid"
+    run_buffer_sampler_pid=""
 
     # Stop watcher
     kill -TERM -$watcher_pid 2>/dev/null
@@ -482,6 +816,7 @@ initialize_database() {
 mkdir -p "$INTERNAL_DATA_DIR"
 > "$DETOAST_PROBE_LOG"
 init_spike_trigger_trace
+ensure_checkpoint_logging
 
 rm -rf $KEY_SIZE_LOG
 rm -f "$KEY_SIZE_FILE_AFTER_EXTEND" "$KEY_SIZE_FILE_AFTER_RUN"
@@ -1283,4 +1618,6 @@ done
 # rm -rf $OUTPUT_CSV
 # rm -rf $KEY_SIZE_LOG
 
+record_checkpoint_log_settings "experiment_end"
+collect_checkpoint_log_messages "experiment" "all" "experiment_end"
 log "=== All steps completed. Results are logged in $LOG_FILE ==="
