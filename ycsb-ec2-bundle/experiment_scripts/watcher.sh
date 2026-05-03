@@ -51,6 +51,7 @@ prev_total_disk_read_sectors=""
 prev_total_disk_write_sectors=""
 prev_total_disk_io_ms=""
 prev_total_disk_weighted_io_ms=""
+DISK_RATES_RESULT=""
 
 csv_escape() {
     local value="${1:-}"
@@ -328,9 +329,31 @@ df_path_info() {
     df -P -T "$path" 2>/dev/null | awk 'NR == 2 {print $1 "\t" $2 "\t" $7}'
 }
 
+device_from_maj_min() {
+    local maj_min="$1"
+    local sys_path device parent
+
+    [ -z "$maj_min" ] && return
+    [ ! -e "/sys/dev/block/$maj_min" ] && return
+
+    sys_path=$(readlink -f "/sys/dev/block/$maj_min" 2>/dev/null || true)
+    [ -z "$sys_path" ] && return
+
+    device=$(basename "$sys_path")
+    if disk_device_exists "$device"; then
+        printf '%s' "$device"
+        return
+    fi
+
+    parent=$(basename "$(dirname "$sys_path")")
+    if disk_device_exists "$parent"; then
+        printf '%s' "$parent"
+    fi
+}
+
 device_for_path() {
     local path="$1"
-    local row source resolved device
+    local row source resolved device maj_min
 
     row=$(df_path_info "$path")
     IFS=$'\t' read -r source _ <<< "$row"
@@ -348,6 +371,13 @@ device_for_path() {
             printf '%s' "$device"
             return
         fi
+    fi
+
+    maj_min=$(findmnt -nro MAJ:MIN --target "$path" 2>/dev/null | head -n 1)
+    device=$(device_from_maj_min "$maj_min")
+    if [ -n "$device" ]; then
+        printf '%s' "$device"
+        return
     fi
 
     printf ''
@@ -546,7 +576,7 @@ collect_disk_rates_for_devices() {
     IFS=, read -r reads writes read_sectors write_sectors io_ms weighted_io_ms <<< "$totals"
 
     if [ -z "$totals" ] || [ "$reads" = "NULL" ]; then
-        printf 'NULL,NULL,NULL,NULL,NULL,NULL,NULL'
+        DISK_RATES_RESULT='NULL,NULL,NULL,NULL,NULL,NULL,NULL'
         return
     fi
 
@@ -574,7 +604,7 @@ collect_disk_rates_for_devices() {
         printf -v "$prev_write_sectors_var" '%s' "$write_sectors"
         printf -v "$prev_io_ms_var" '%s' "$io_ms"
         printf -v "$prev_weighted_io_ms_var" '%s' "$weighted_io_ms"
-        printf '0,0,0,0,0,0,0'
+        DISK_RATES_RESULT='0,0,0,0,0,0,0'
         return
     fi
 
@@ -594,7 +624,7 @@ collect_disk_rates_for_devices() {
     [ "$delta_io_ms" -lt 0 ] && delta_io_ms=0
     [ "$delta_weighted_io_ms" -lt 0 ] && delta_weighted_io_ms=0
 
-    awk -v elapsed_ms="$elapsed_ms" \
+    DISK_RATES_RESULT=$(awk -v elapsed_ms="$elapsed_ms" \
         -v dr="$delta_reads" \
         -v dw="$delta_writes" \
         -v drs="$delta_read_sectors" \
@@ -613,7 +643,7 @@ collect_disk_rates_for_devices() {
             util_pct = dio * 100.0 / elapsed_ms
             if (util_pct > 100) util_pct = 100
             printf "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f", reads_s, writes_s, read_kb_s, write_kb_s, await_ms, aqu_sz, util_pct
-        }'
+        }')
 
     printf -v "$prev_ts_var" '%s' "$now_ms"
     printf -v "$prev_reads_var" '%s' "$reads"
@@ -763,8 +793,10 @@ while true; do
         echo "$db_name,$phase,$epoch,$ts_ms,$(collect_db_stats),$(collect_wait_stats)" >> "$PG_1S_FILE"
     fi
     if [ -n "$OS_1S_FILE" ]; then
-        selected_disk_rates=$(collect_disk_rates_for_devices "$OS_DISK_SELECTION" "selected")
-        total_disk_rates=$(collect_disk_rates_for_devices "$OS_DISK_TOTAL_DEVICES" "total")
+        collect_disk_rates_for_devices "$OS_DISK_SELECTION" "selected"
+        selected_disk_rates="$DISK_RATES_RESULT"
+        collect_disk_rates_for_devices "$OS_DISK_TOTAL_DEVICES" "total"
+        total_disk_rates="$DISK_RATES_RESULT"
         echo "$db_name,$phase,$epoch,$ts_ms,$cpu,$mem_kb,$(collect_meminfo),$selected_disk_rates,$OS_DISK_SELECTION_LABEL,$OS_DISK_SELECTION_SOURCE,$total_disk_rates" >> "$OS_1S_FILE"
     fi
     if [ "$DB_STATS_INTERVAL" -gt 0 ] && [ $((ts - last_db_stats)) -ge "$DB_STATS_INTERVAL" ]; then
