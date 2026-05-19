@@ -206,6 +206,16 @@ def quote_ident(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def postgres_major_from_version(version_text: object) -> Optional[int]:
+    match = re.search(r"PostgreSQL\s+(\d+)", str(version_text or ""))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
 def safe_name(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
     return value.strip("_") or "phase"
@@ -804,6 +814,7 @@ def preflight(args: argparse.Namespace) -> None:
     try:
         result["current_database"] = pg.scalar(args.db_name, "SELECT current_database();", timeout=5)
         result["postgres_version"] = pg.scalar(args.db_name, "SELECT version();", timeout=5)
+        result["postgres_major_version"] = postgres_major_from_version(result["postgres_version"])
         result["can_connect"] = True
         (sql_dir / "postgres_version.txt").write_text(str(result["postgres_version"]) + "\n", encoding="utf-8")
     except Exception as exc:
@@ -814,6 +825,13 @@ def preflight(args: argparse.Namespace) -> None:
     for view in STATS_VIEWS:
         cols = view_columns(pg, args.db_name, view)
         result["stats_views"][view] = {"available": bool(cols), "columns": cols}
+
+    major = result.get("postgres_major_version")
+    if isinstance(major, int):
+        if major < 16 and not result["stats_views"].get("pg_stat_io", {}).get("available"):
+            result["warnings"].append("pg_stat_io is PostgreSQL 16+; this run will rely on pg_stat_database/pg_statio_* plus OS I/O metrics.")
+        if major < 17 and not result["stats_views"].get("pg_stat_checkpointer", {}).get("available"):
+            result["warnings"].append("pg_stat_checkpointer is PostgreSQL 17+; checkpoint deltas will be read from pg_stat_bgwriter when those columns exist.")
 
     try:
         settings_rows = pg.rows(
@@ -1007,16 +1025,6 @@ def sample_loop(args: argparse.Namespace) -> None:
     append_log(run_dir, f"sampler stop phase_id={args.phase_id}", "sampler.log")
 
 
-def read_first_data_row(path: Path) -> Dict[str, str]:
-    if not path.exists():
-        return {}
-    with path.open(newline="", encoding="utf-8", errors="replace") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            return dict(row)
-    return {}
-
-
 def to_float(value: object) -> Optional[float]:
     if value is None:
         return None
@@ -1095,6 +1103,47 @@ def read_phase_metadata(run_dir: Path) -> Dict[str, Dict[str, str]]:
                 current["exit_status"] = row.get("exit_status", "")
                 current["ycsb_output"] = row.get("ycsb_output", current.get("ycsb_output", ""))
     return result
+
+
+def read_csv_rows(path: Path) -> List[Dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8", errors="replace") as fh:
+        return list(csv.DictReader(fh))
+
+
+def read_first_data_row(path: Path) -> Dict[str, str]:
+    rows = read_csv_rows(path)
+    return rows[0] if rows else {}
+
+
+def row_matches(row: Dict[str, str], filters: Dict[str, str]) -> bool:
+    for key, expected in filters.items():
+        if row.get(key, "").strip().lower() != expected.lower():
+            return False
+    return True
+
+
+def filtered_sum(rows: List[Dict[str, str]], column: str, filters: Dict[str, str]) -> Optional[float]:
+    matched = False
+    total = 0.0
+    for row in rows:
+        if not row_matches(row, filters):
+            continue
+        value = to_float(row.get(column))
+        if value is None:
+            continue
+        matched = True
+        total += value
+    return total if matched else None
+
+
+def filtered_delta(after_rows: List[Dict[str, str]], before_rows: List[Dict[str, str]], column: str, filters: Dict[str, str]) -> Optional[float]:
+    after_sum = filtered_sum(after_rows, column, filters)
+    before_sum = filtered_sum(before_rows, column, filters)
+    if after_sum is None and before_sum is None:
+        return None
+    return (after_sum or 0.0) - (before_sum or 0.0)
 
 
 def fmt(value: Optional[float]) -> str:
@@ -1200,14 +1249,16 @@ def derive(args: argparse.Namespace) -> None:
         after_wal = read_first_data_row(after_dir / "pg_stat_wal.csv")
         before_bg = read_first_data_row(before_dir / "pg_stat_bgwriter.csv")
         after_bg = read_first_data_row(after_dir / "pg_stat_bgwriter.csv")
+        before_checkpointer = read_first_data_row(before_dir / "pg_stat_checkpointer.csv")
+        after_checkpointer = read_first_data_row(after_dir / "pg_stat_checkpointer.csv")
         before_tbl = read_first_data_row(before_dir / "pg_stat_user_tables.csv")
         after_tbl = read_first_data_row(after_dir / "pg_stat_user_tables.csv")
         before_statio = read_first_data_row(before_dir / "pg_statio_user_tables.csv")
         after_statio = read_first_data_row(after_dir / "pg_statio_user_tables.csv")
         before_size = read_first_data_row(before_dir / "relation_sizes.csv")
         after_size = read_first_data_row(after_dir / "relation_sizes.csv")
-        before_io = read_first_data_row(before_dir / "pg_stat_io.csv")
-        after_io = read_first_data_row(after_dir / "pg_stat_io.csv")
+        before_io_rows = read_csv_rows(before_dir / "pg_stat_io.csv")
+        after_io_rows = read_csv_rows(after_dir / "pg_stat_io.csv")
 
         ycsb = parse_ycsb_output(meta.get("ycsb_output", ""))
         ops = ycsb.get("ops_total") or to_float(meta.get("operation_count"))
@@ -1237,6 +1288,28 @@ def derive(args: argparse.Namespace) -> None:
         toast_blocks = (delta(after_statio, before_statio, "toast_blks_read") or 0) + (delta(after_statio, before_statio, "toast_blks_hit") or 0)
         toast_index_blocks = (delta(after_statio, before_statio, "tidx_blks_read") or 0) + (delta(after_statio, before_statio, "tidx_blks_hit") or 0)
         block_total = heap_blocks + index_blocks + toast_blocks + toast_index_blocks
+
+        checkpoint_buffers_written = delta(after_checkpointer, before_checkpointer, "buffers_written")
+        checkpoint_write_time = delta(after_checkpointer, before_checkpointer, "write_time")
+        checkpoint_sync_time = delta(after_checkpointer, before_checkpointer, "sync_time")
+        if checkpoint_buffers_written is None:
+            checkpoint_buffers_written = delta(after_bg, before_bg, "buffers_checkpoint")
+        if checkpoint_write_time is None:
+            checkpoint_write_time = delta(after_bg, before_bg, "checkpoint_write_time")
+        if checkpoint_sync_time is None:
+            checkpoint_sync_time = delta(after_bg, before_bg, "checkpoint_sync_time")
+
+        client_relation = {"backend_type": "client backend", "object": "relation"}
+        wal_io = {"object": "wal"}
+        client_reads = filtered_delta(after_io_rows, before_io_rows, "reads", client_relation)
+        client_writes = filtered_delta(after_io_rows, before_io_rows, "writes", client_relation)
+        client_fsyncs = filtered_delta(after_io_rows, before_io_rows, "fsyncs", client_relation)
+        client_evictions = filtered_delta(after_io_rows, before_io_rows, "evictions", client_relation)
+        client_read_time = filtered_delta(after_io_rows, before_io_rows, "read_time", client_relation)
+        client_write_time = filtered_delta(after_io_rows, before_io_rows, "write_time", client_relation)
+        client_fsync_time = filtered_delta(after_io_rows, before_io_rows, "fsync_time", client_relation)
+        wal_writes = filtered_delta(after_io_rows, before_io_rows, "writes", wal_io)
+        wal_fsyncs = filtered_delta(after_io_rows, before_io_rows, "fsyncs", wal_io)
 
         row = {
             "run_id": args.run_id,
@@ -1289,20 +1362,20 @@ def derive(args: argparse.Namespace) -> None:
             "buffers_clean_delta": fmt(delta(after_bg, before_bg, "buffers_clean")),
             "buffers_alloc_delta": fmt(delta(after_bg, before_bg, "buffers_alloc")),
             "maxwritten_clean_delta": fmt(delta(after_bg, before_bg, "maxwritten_clean")),
-            "checkpoint_buffers_written_delta": fmt(delta(after_bg, before_bg, "buffers_checkpoint")),
-            "checkpoint_write_time_delta": fmt(delta(after_bg, before_bg, "checkpoint_write_time")),
-            "checkpoint_sync_time_delta": fmt(delta(after_bg, before_bg, "checkpoint_sync_time")),
-            "checkpoint_write_time_per_op": fmt(safe_div(delta(after_bg, before_bg, "checkpoint_write_time"), ops)),
-            "checkpoint_sync_time_per_op": fmt(safe_div(delta(after_bg, before_bg, "checkpoint_sync_time"), ops)),
-            "client_backend_relation_reads_delta": fmt(delta(after_io, before_io, "reads")),
-            "client_backend_relation_writes_delta": fmt(delta(after_io, before_io, "writes")),
-            "client_backend_relation_fsyncs_delta": fmt(delta(after_io, before_io, "fsyncs")),
-            "client_backend_relation_evictions_delta": fmt(delta(after_io, before_io, "evictions")),
-            "wal_writes_delta": "",
-            "wal_fsyncs_delta": "",
-            "read_time_delta": fmt(delta(after_io, before_io, "read_time")),
-            "write_time_delta": fmt(delta(after_io, before_io, "write_time")),
-            "fsync_time_delta": fmt(delta(after_io, before_io, "fsync_time")),
+            "checkpoint_buffers_written_delta": fmt(checkpoint_buffers_written),
+            "checkpoint_write_time_delta": fmt(checkpoint_write_time),
+            "checkpoint_sync_time_delta": fmt(checkpoint_sync_time),
+            "checkpoint_write_time_per_op": fmt(safe_div(checkpoint_write_time, ops)),
+            "checkpoint_sync_time_per_op": fmt(safe_div(checkpoint_sync_time, ops)),
+            "client_backend_relation_reads_delta": fmt(client_reads),
+            "client_backend_relation_writes_delta": fmt(client_writes),
+            "client_backend_relation_fsyncs_delta": fmt(client_fsyncs),
+            "client_backend_relation_evictions_delta": fmt(client_evictions),
+            "wal_writes_delta": fmt(wal_writes),
+            "wal_fsyncs_delta": fmt(wal_fsyncs),
+            "read_time_delta": fmt(client_read_time),
+            "write_time_delta": fmt(client_write_time),
+            "fsync_time_delta": fmt(client_fsync_time),
             "p99_latency_ms_per_kb": fmt(safe_div(ycsb.get("latency_p99_ms"), safe_div(logical_bytes_per_op, 1024.0))),
             "total_physical_bytes_per_logical_byte": fmt(safe_div((total_growth or 0) + (wal_bytes or 0), logical_bytes)),
         }
@@ -1318,25 +1391,46 @@ def derive(args: argparse.Namespace) -> None:
 
     preflight_path = run_dir / "sql" / "preflight.json"
     unavailable = []
+    expected_unavailable = []
+    unexpected_unavailable = []
+    compatibility_notes = []
+    postgres_major = None
     if preflight_path.exists():
         try:
             preflight_data = json.loads(preflight_path.read_text(encoding="utf-8"))
+            postgres_major = preflight_data.get("postgres_major_version") or postgres_major_from_version(preflight_data.get("postgres_version", ""))
             unavailable = [k for k, v in preflight_data.get("stats_views", {}).items() if not v.get("available")]
+            if isinstance(postgres_major, int):
+                if postgres_major < 16 and "pg_stat_io" in unavailable:
+                    expected_unavailable.append("pg_stat_io")
+                    compatibility_notes.append("pg_stat_io is PostgreSQL 16+; I/O interpretation falls back to pg_stat_database, pg_statio_* and OS metrics.")
+                if postgres_major < 17 and "pg_stat_checkpointer" in unavailable:
+                    expected_unavailable.append("pg_stat_checkpointer")
+                    compatibility_notes.append("pg_stat_checkpointer is PostgreSQL 17+; checkpoint deltas are sourced from pg_stat_bgwriter on this server.")
+            unexpected_unavailable = [name for name in unavailable if name not in set(expected_unavailable)]
         except Exception:
             unavailable = []
+            expected_unavailable = []
+            unexpected_unavailable = []
     summary_lines = [
         f"# Benchmark Observability Summary",
         "",
         f"- run_id: {args.run_id}",
         f"- generated_utc: {utc_now()}",
+        f"- postgresql_major_version: {postgres_major if postgres_major is not None else 'unknown'}",
         f"- phases_with_deltas: {len(rows)}",
         f"- unavailable_metrics: {', '.join(unavailable) if unavailable else 'none recorded'}",
+        f"- expected_unavailable_metrics: {', '.join(expected_unavailable) if expected_unavailable else 'none recorded'}",
+        f"- unexpected_unavailable_metrics: {', '.join(unexpected_unavailable) if unexpected_unavailable else 'none recorded'}",
         "",
         "These metrics are phase-level deltas from cumulative PostgreSQL counters. They are consistent with changes during the phase, but do not by themselves prove causality.",
         "",
-        "## Phase Highlights",
-        "",
     ]
+    if compatibility_notes:
+        summary_lines.extend(["## Compatibility Notes", ""])
+        summary_lines.extend([f"- {note}" for note in compatibility_notes])
+        summary_lines.append("")
+    summary_lines.extend(["## Phase Highlights", ""])
     for row in rows[:50]:
         summary_lines.append(
             f"- {row['phase_id']}: wal_bytes/op={row.get('wal_bytes_per_op','')}, "

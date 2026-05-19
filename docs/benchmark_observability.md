@@ -37,6 +37,21 @@ Optional controls:
 Passwords are read from the existing environment variables, not written to the
 manifest.
 
+## PostgreSQL Version Notes
+
+The harness is version-aware and degrades by server capability:
+
+- PostgreSQL 15: no `pg_stat_io`; checkpoint counters are read from
+  `pg_stat_bgwriter`.
+- PostgreSQL 16: `pg_stat_io` is collected and derived I/O metrics aggregate the
+  `client backend`/`relation` rows; checkpoint counters still come from
+  `pg_stat_bgwriter`.
+- PostgreSQL 17+: `pg_stat_io` is collected and checkpoint counters prefer
+  `pg_stat_checkpointer`, falling back to `pg_stat_bgwriter` if needed.
+
+On PostgreSQL 16, `pg_stat_checkpointer` being unavailable is expected, not a
+broken subsystem.
+
 ## Output Layout
 
 Each run directory contains:

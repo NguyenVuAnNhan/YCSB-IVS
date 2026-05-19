@@ -667,11 +667,19 @@ benchrun_phase_id() {
 }
 
 benchrun_redact_stream() {
-    sed -E \
-        -e 's/(db\.passwd=)[^[:space:]]+/\1[REDACTED]/g' \
-        -e 's/(db\.password=)[^[:space:]]+/\1[REDACTED]/g' \
-        -e 's/((PGPASSWORD|DB_PWD|DB_PASS|PASSWORD|password|passwd)=)[^[:space:]]+/\1[REDACTED]/g' \
-        -e 's#(postgres(ql)?://[^:/@[:space:]]+:)[^@[:space:]]+(@)#\1[REDACTED]\3#g'
+    if command -v stdbuf >/dev/null 2>&1; then
+        stdbuf -oL -eL sed -u -E \
+            -e 's/(db\.passwd=)[^[:space:]]+/\1[REDACTED]/g' \
+            -e 's/(db\.password=)[^[:space:]]+/\1[REDACTED]/g' \
+            -e 's/((PGPASSWORD|DB_PWD|DB_PASS|PASSWORD|password|passwd)=)[^[:space:]]+/\1[REDACTED]/g' \
+            -e 's#(postgres(ql)?://[^:/@[:space:]]+:)[^@[:space:]]+(@)#\1[REDACTED]\3#g'
+    else
+        sed -u -E \
+            -e 's/(db\.passwd=)[^[:space:]]+/\1[REDACTED]/g' \
+            -e 's/(db\.password=)[^[:space:]]+/\1[REDACTED]/g' \
+            -e 's/((PGPASSWORD|DB_PWD|DB_PASS|PASSWORD|password|passwd)=)[^[:space:]]+/\1[REDACTED]/g' \
+            -e 's#(postgres(ql)?://[^:/@[:space:]]+:)[^@[:space:]]+(@)#\1[REDACTED]\3#g'
+    fi
 }
 
 benchrun_copy_sanitized_file() {
