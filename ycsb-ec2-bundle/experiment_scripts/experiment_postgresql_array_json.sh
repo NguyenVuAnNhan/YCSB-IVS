@@ -8,6 +8,86 @@ export YCSB_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
 export PATH="$YCSB_HOME/bin:$PATH"
 
 YCSB="../bin/ycsb.sh"
+OBSERVABILITY_HELPER="$SCRIPT_DIR/benchmark_observability.py"
+
+BENCHRUN_RUN_ID="${BENCHRUN_RUN_ID:-}"
+BENCHRUN_OUTPUT_DIR="${BENCHRUN_OUTPUT_DIR:-$SCRIPT_DIR/benchruns}"
+TARGET_TABLE="${TARGET_TABLE:-usertable}"
+BENCHRUN_SAMPLE_INTERVAL_SECONDS="${BENCHRUN_SAMPLE_INTERVAL_SECONDS:-5}"
+BENCHRUN_RELATION_SIZE_SAMPLE_INTERVAL_SECONDS="${BENCHRUN_RELATION_SIZE_SAMPLE_INTERVAL_SECONDS:-30}"
+BENCHRUN_ENABLE_OS_WATCHERS="${BENCHRUN_ENABLE_OS_WATCHERS:-1}"
+BENCHRUN_RESET_PG_STATS_BEFORE_RUN="${BENCHRUN_RESET_PG_STATS_BEFORE_RUN:-0}"
+BENCHRUN_INSPECT_WAL_RANGES="${BENCHRUN_INSPECT_WAL_RANGES:-0}"
+BENCHRUN_DRY_RUN_PREFLIGHT="${BENCHRUN_DRY_RUN_PREFLIGHT:-0}"
+BENCHRUN_SKIP_CONTINUOUS_SAMPLING="${BENCHRUN_SKIP_CONTINUOUS_SAMPLING:-0}"
+BENCHRUN_SKIP_DERIVED_ANALYSIS="${BENCHRUN_SKIP_DERIVED_ANALYSIS:-0}"
+BENCHRUN_PHASE_VALUE_SIZES="${BENCHRUN_PHASE_VALUE_SIZES:-}"
+CLI_DB_URL=""
+ORIGINAL_COMMAND_LINE="$0 $*"
+
+usage() {
+    cat <<'USAGE'
+Usage: ./experiment_postgresql_array_json.sh [observability options]
+
+Existing environment variables still work. Optional additions:
+  --run-id ID
+  --output-dir DIR
+  --target-table TABLE
+  --database-url JDBC_URL
+  --sample-interval-seconds N
+  --relation-size-sample-interval-seconds N
+  --enable-os-watchers | --disable-os-watchers
+  --reset-pg-stats-before-run
+  --inspect-wal-ranges
+  --phase-value-sizes LIST
+  --dry-run-preflight
+  --skip-continuous-sampling
+  --skip-derived-analysis
+  --help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --run-id)
+            BENCHRUN_RUN_ID="$2"; shift 2 ;;
+        --output-dir)
+            BENCHRUN_OUTPUT_DIR="$2"; shift 2 ;;
+        --target-table)
+            TARGET_TABLE="$2"; shift 2 ;;
+        --database-url)
+            CLI_DB_URL="$2"; shift 2 ;;
+        --sample-interval-seconds)
+            BENCHRUN_SAMPLE_INTERVAL_SECONDS="$2"; shift 2 ;;
+        --relation-size-sample-interval-seconds)
+            BENCHRUN_RELATION_SIZE_SAMPLE_INTERVAL_SECONDS="$2"; shift 2 ;;
+        --enable-os-watchers)
+            BENCHRUN_ENABLE_OS_WATCHERS=1; shift ;;
+        --disable-os-watchers)
+            BENCHRUN_ENABLE_OS_WATCHERS=0; shift ;;
+        --reset-pg-stats-before-run)
+            BENCHRUN_RESET_PG_STATS_BEFORE_RUN=1; shift ;;
+        --inspect-wal-ranges)
+            BENCHRUN_INSPECT_WAL_RANGES=1
+            SPIKE_TRIGGER_WALINSPECT_ENABLED=1
+            shift ;;
+        --phase-value-sizes)
+            BENCHRUN_PHASE_VALUE_SIZES="$2"; shift 2 ;;
+        --dry-run-preflight)
+            BENCHRUN_DRY_RUN_PREFLIGHT=1; shift ;;
+        --skip-continuous-sampling)
+            BENCHRUN_SKIP_CONTINUOUS_SAMPLING=1; shift ;;
+        --skip-derived-analysis)
+            BENCHRUN_SKIP_DERIVED_ANALYSIS=1; shift ;;
+        --help|-h)
+            usage
+            exit 0 ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 2 ;;
+    esac
+done
 
 # DB names
 DB_NAME="${DB_NAME:-ycsb}"
@@ -15,7 +95,7 @@ BACKUP_DB_NAME="${BACKUP_DB_NAME:-ycsb_backup}"
 UNCHANGE_DB_NAME="${UNCHANGE_DB_NAME:-ycsb_unchange}"
 
 # Path to the PostgreSQL data directory
-DB_URL="${DB_URL:-jdbc:postgresql://localhost:5432/$DB_NAME}"
+DB_URL="${CLI_DB_URL:-${DB_URL:-jdbc:postgresql://localhost:5432/$DB_NAME}}"
 JDBC_PROPERTIES="${JDBC_PROPERTIES:-../jdbc-binding/conf/postgres.properties}"
 DB_USERNAME="${DB_USERNAME:-ycsb}"
 DB_PWD="${DB_PWD:-USyd2025}"
@@ -64,9 +144,27 @@ OS_DISK_DEVICES="${OS_DISK_DEVICES:-auto}"
 SPIKE_TRIGGER_TRACE_ENABLED=${SPIKE_TRIGGER_TRACE_ENABLED:-1}
 SPIKE_TRIGGER_READ_SAMPLE_RATE=${SPIKE_TRIGGER_READ_SAMPLE_RATE:-100}
 SPIKE_TRIGGER_SLOW_READ_US=${SPIKE_TRIGGER_SLOW_READ_US:-1000}
-SPIKE_TRIGGER_BUFFER_PROGRESS_PCTS="${SPIKE_TRIGGER_BUFFER_PROGRESS_PCTS:-10 25 50}"
+SPIKE_TRIGGER_BUFFER_PROGRESS_PCTS="${SPIKE_TRIGGER_BUFFER_PROGRESS_PCTS:-1 2 5 10 25 50}"
+SPIKE_TRIGGER_PAGE_IDENTITY_ENABLED=${SPIKE_TRIGGER_PAGE_IDENTITY_ENABLED:-1}
+SPIKE_TRIGGER_PAGE_IDENTITY_SAMPLE_MOD=${SPIKE_TRIGGER_PAGE_IDENTITY_SAMPLE_MOD:-32}
+SPIKE_TRIGGER_PAGE_IDENTITY_MIN_USAGECOUNT=${SPIKE_TRIGGER_PAGE_IDENTITY_MIN_USAGECOUNT:-4}
+SPIKE_TRIGGER_PAGE_IDENTITY_BASE_EVENTS="${SPIKE_TRIGGER_PAGE_IDENTITY_BASE_EVENTS:-before_run run_progress_5pct run_progress_10pct after_run}"
+SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EPOCHS="${SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EPOCHS:-45-50 56-61 68-73 81-86 94-100}"
+SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EVENTS="${SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EVENTS:-after_extend after_vacuum before_run run_progress_1pct run_progress_2pct run_progress_5pct run_progress_10pct run_progress_25pct run_progress_50pct after_run}"
+SPIKE_TRIGGER_FREESPACE_ENABLED=${SPIKE_TRIGGER_FREESPACE_ENABLED:-1}
+SPIKE_TRIGGER_FREESPACE_SAMPLE_MAX_PAGES=${SPIKE_TRIGGER_FREESPACE_SAMPLE_MAX_PAGES:-4096}
+SPIKE_TRIGGER_FREESPACE_BASE_EVENTS="${SPIKE_TRIGGER_FREESPACE_BASE_EVENTS:-after_extend after_vacuum before_run after_run}"
+SPIKE_TRIGGER_FREESPACE_FOCUS_EPOCHS="${SPIKE_TRIGGER_FREESPACE_FOCUS_EPOCHS:-$SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EPOCHS}"
+SPIKE_TRIGGER_FREESPACE_FOCUS_EVENTS="${SPIKE_TRIGGER_FREESPACE_FOCUS_EVENTS:-run_progress_5pct run_progress_10pct}"
 SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED=${SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED:-1}
 SPIKE_TRIGGER_CHECKPOINT_LOG_TAIL_LINES=${SPIKE_TRIGGER_CHECKPOINT_LOG_TAIL_LINES:-5000}
+SPIKE_TRIGGER_PG_STAT_STATEMENTS_ENABLED=${SPIKE_TRIGGER_PG_STAT_STATEMENTS_ENABLED:-1}
+SPIKE_TRIGGER_PG_STAT_STATEMENTS_RESET_PER_PHASE=${SPIKE_TRIGGER_PG_STAT_STATEMENTS_RESET_PER_PHASE:-1}
+SPIKE_TRIGGER_PG_STAT_STATEMENTS_TOP_N=${SPIKE_TRIGGER_PG_STAT_STATEMENTS_TOP_N:-25}
+SPIKE_TRIGGER_PG_STAT_STATEMENTS_QUERY_FILTER="${SPIKE_TRIGGER_PG_STAT_STATEMENTS_QUERY_FILTER:-usertable}"
+SPIKE_TRIGGER_WALINSPECT_ENABLED=${SPIKE_TRIGGER_WALINSPECT_ENABLED:-$BENCHRUN_INSPECT_WAL_RANGES}
+SPIKE_TRIGGER_WALINSPECT_PER_RECORD=${SPIKE_TRIGGER_WALINSPECT_PER_RECORD:-1}
+SPIKE_TRIGGER_WALINSPECT_MAX_BYTES=${SPIKE_TRIGGER_WALINSPECT_MAX_BYTES:-0}
 RUN_NAME="${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}"
 TRIGGER_DATA_DIR="${INTERNAL_DATA_DIR}/toast_spike_trigger"
 PHASE_TIMELINE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_phase_timeline.csv"
@@ -79,6 +177,11 @@ CHECKPOINT_LOG_MESSAGES_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_checkpoint_log_mes
 CHECKPOINT_LOG_SEEN_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_checkpoint_log_messages.seen"
 VACUUM_PROGRESS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_vacuum_progress_1s.csv"
 BUFFER_RESIDENCY_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_buffer_residency.csv"
+BUFFER_PAGE_IDENTITY_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_buffer_page_identity.csv"
+FREESPACE_SUMMARY_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_freespace_summary.csv"
+PG_STAT_STATEMENTS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_pg_stat_statements.csv"
+WAL_BOUNDS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_wal_bounds.csv"
+WAL_STATS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_wal_stats.csv"
 READ_SAMPLE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_read_sample.csv"
 SLOW_READ_SAMPLE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_slow_read_sample.csv"
 SAMPLED_DETOAST_PROBE_LOG="${TRIGGER_DATA_DIR}/${RUN_NAME}_detoast_probe_sampled_keys.log"
@@ -139,12 +242,21 @@ postgres_log_file_candidates() {
         return
     fi
 
-    local row data_dir log_dir logging_collector log_destination candidate_dir
+    local row data_dir log_dir logging_collector log_destination candidate_dir current_logfile
 
     row=$(postgres_setting_row "SELECT current_setting('data_directory', true), current_setting('log_directory', true), current_setting('logging_collector', true), current_setting('log_destination', true);")
     IFS=$'\t' read -r data_dir log_dir logging_collector log_destination <<< "$row"
 
     {
+        current_logfile=$(postgres_setting_row "SELECT pg_current_logfile();" | head -1)
+        if [ -n "$current_logfile" ]; then
+            if [[ "$current_logfile" == /* ]]; then
+                printf '%s\n' "$current_logfile"
+            elif [ -n "$data_dir" ]; then
+                printf '%s\n' "${data_dir%/}/$current_logfile"
+            fi
+        fi
+
         if [ -n "$log_dir" ]; then
             if [[ "$log_dir" == /* ]]; then
                 candidate_dir="$log_dir"
@@ -266,15 +378,22 @@ collect_checkpoint_log_messages() {
     local phase_label="$1"
     local epoch_label="$2"
     local event_label="$3"
-    local source_path raw_line saw_source saw_message
+    local source_path raw_line saw_source saw_message saw_unreadable unreadable_sources
     local checkpoint_pattern='checkpoint (starting|complete|skipped)|restartpoint (starting|complete|skipped)|checkpoints are occurring too frequently'
 
     saw_source=0
     saw_message=0
+    saw_unreadable=0
+    unreadable_sources=""
     touch "$CHECKPOINT_LOG_SEEN_FILE" 2>/dev/null || true
 
     while IFS= read -r source_path; do
         [ -z "$source_path" ] && continue
+        if [ ! -r "$source_path" ]; then
+            saw_unreadable=1
+            unreadable_sources="${unreadable_sources:+$unreadable_sources; }$source_path"
+            continue
+        fi
         saw_source=1
         while IFS= read -r raw_line; do
             [ -z "$raw_line" ] && continue
@@ -291,6 +410,11 @@ collect_checkpoint_log_messages() {
                 saw_message=1
             fi
         done < <(journalctl --since "@$TRACE_START_EPOCH_SECONDS" --no-pager -o short-iso _COMM=postgres 2>/dev/null | grep -Ei "$checkpoint_pattern" || true)
+    fi
+
+    if [ "$saw_source" -eq 0 ] && [ "$saw_unreadable" -eq 1 ] && [ "$saw_message" -eq 0 ]; then
+        record_checkpoint_log_message_row "$phase_label" "$epoch_label" "$event_label" "checkpoint_log_unreadable" "PostgreSQL log file(s) were found but not readable by user $(id -un): $unreadable_sources" >/dev/null || true
+        saw_message=1
     fi
 
     if [ "$saw_source" -eq 0 ] && [ "$saw_message" -eq 0 ]; then
@@ -373,6 +497,137 @@ ensure_pg_buffercache_extension() {
     fi
 }
 
+ensure_pg_freespacemap_extension() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_FREESPACE_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local freespacemap_schema grant_role signature
+    grant_role=${DB_USERNAME//\"/\"\"}
+
+    if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "CREATE EXTENSION IF NOT EXISTS pg_freespacemap;" >/dev/null 2>&1
+    then
+        log "Warning: could not ensure pg_freespacemap in $db_name. Free-space rows may show pg_freespacemap_unavailable. Set PG_EXTENSION_USERNAME/PG_EXTENSION_PWD to a role that can create extensions, or install pg_freespacemap in template1."
+        return
+    fi
+
+    freespacemap_schema=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -U "$PG_EXTENSION_USERNAME" -d "$db_name" -At -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_freespacemap';
+    " 2>/dev/null || true)
+
+    if [ -z "$freespacemap_schema" ]; then
+        log "Warning: pg_freespacemap extension was not found in $db_name after CREATE EXTENSION."
+        return
+    fi
+
+    for signature in "regclass" "regclass,bigint"; do
+        PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+            -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+            -c "GRANT EXECUTE ON FUNCTION ${freespacemap_schema}.pg_freespace($signature) TO \"$grant_role\";" >/dev/null 2>&1 || true
+    done
+}
+
+ensure_pg_stat_statements_extension() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_PG_STAT_STATEMENTS_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local statements_schema grant_role signature
+    grant_role=${DB_USERNAME//\"/\"\"}
+
+    if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" >/dev/null 2>&1
+    then
+        log "Warning: could not ensure pg_stat_statements in $db_name. Statement rows may show pg_stat_statements_unavailable. Set PG_EXTENSION_USERNAME/PG_EXTENSION_PWD to a role that can create extensions, or install pg_stat_statements in template1."
+        return
+    fi
+
+    statements_schema=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -U "$PG_EXTENSION_USERNAME" -d "$db_name" -At -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_stat_statements';
+    " 2>/dev/null || true)
+
+    if [ -z "$statements_schema" ]; then
+        log "Warning: pg_stat_statements extension was not found in $db_name after CREATE EXTENSION."
+        return
+    fi
+
+    if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "GRANT SELECT ON ${statements_schema}.pg_stat_statements TO \"$grant_role\";" >/dev/null 2>&1
+    then
+        log "Warning: could not grant SELECT on ${statements_schema}.pg_stat_statements to $DB_USERNAME in $db_name."
+    fi
+
+    for signature in "" "oid,oid,bigint" "oid,oid,bigint,boolean"; do
+        PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+            -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+            -c "GRANT EXECUTE ON FUNCTION ${statements_schema}.pg_stat_statements_reset($signature) TO \"$grant_role\";" >/dev/null 2>&1 || true
+    done
+
+    if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "SELECT 1 FROM ${statements_schema}.pg_stat_statements LIMIT 1;" >/dev/null 2>&1
+    then
+        log "Warning: pg_stat_statements exists in $db_name but is not queryable. Add pg_stat_statements to shared_preload_libraries and restart PostgreSQL before relying on statement-level traces."
+    fi
+}
+
+ensure_pg_walinspect_extension() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_WALINSPECT_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local walinspect_schema grant_role signature function_name
+    grant_role=${DB_USERNAME//\"/\"\"}
+
+    if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "CREATE EXTENSION IF NOT EXISTS pg_walinspect;" >/dev/null 2>&1
+    then
+        log "Warning: could not ensure pg_walinspect in $db_name. WAL inspection rows may show pg_walinspect_unavailable. Set PG_EXTENSION_USERNAME/PG_EXTENSION_PWD to a role that can create extensions, or install pg_walinspect in template1."
+        return
+    fi
+
+    walinspect_schema=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -U "$PG_EXTENSION_USERNAME" -d "$db_name" -At -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_walinspect';
+    " 2>/dev/null || true)
+
+    if [ -z "$walinspect_schema" ]; then
+        log "Warning: pg_walinspect extension was not found in $db_name after CREATE EXTENSION."
+        return
+    fi
+
+    for function_name in pg_get_wal_record_info pg_get_wal_records_info pg_get_wal_stats; do
+        for signature in "pg_lsn" "pg_lsn,pg_lsn" "pg_lsn,pg_lsn,boolean"; do
+            PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+                -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+                -c "GRANT EXECUTE ON FUNCTION ${walinspect_schema}.${function_name}($signature) TO \"$grant_role\";" >/dev/null 2>&1 || true
+        done
+    done
+
+    if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE quote_ident(n.nspname) = '$walinspect_schema' AND p.proname = 'pg_get_wal_stats' LIMIT 1;" >/dev/null 2>&1
+    then
+        log "Warning: pg_walinspect exists in $db_name but pg_get_wal_stats was not found."
+    fi
+}
+
 collect_cpu_memory_metrics() {
     cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum + 0}')
     memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum + 0}')
@@ -390,6 +645,337 @@ csv_escape() {
     else
         printf '%s' "$value"
     fi
+}
+
+utc_now() {
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+BENCHRUN_DIR=""
+BENCHRUN_STARTED=0
+BENCHRUN_CLEANED_UP=0
+BENCHRUN_HEARTBEAT_PID=""
+BENCHRUN_VMSTAT_PID=""
+BENCHRUN_IOSTAT_PID=""
+BENCHRUN_PHASE_SAMPLER_PID=""
+BENCHRUN_CURRENT_PHASE_ID=""
+BENCHRUN_CHILD_PIDS=()
+BENCHRUN_CHILD_PGIDS=()
+
+benchrun_phase_id() {
+    printf '%s_%s_%s' "$1" "$2" "$3" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+benchrun_redact_stream() {
+    sed -E \
+        -e 's/(db\.passwd=)[^[:space:]]+/\1[REDACTED]/g' \
+        -e 's/(db\.password=)[^[:space:]]+/\1[REDACTED]/g' \
+        -e 's/((PGPASSWORD|DB_PWD|DB_PASS|PASSWORD|password|passwd)=)[^[:space:]]+/\1[REDACTED]/g' \
+        -e 's#(postgres(ql)?://[^:/@[:space:]]+:)[^@[:space:]]+(@)#\1[REDACTED]\3#g'
+}
+
+benchrun_copy_sanitized_file() {
+    local src="$1"
+    local dst="$2"
+    [ -f "$src" ] || return
+    mkdir -p "$(dirname "$dst")"
+    benchrun_redact_stream < "$src" > "$dst"
+}
+
+benchrun_common_args() {
+    printf '%s\0' \
+        --run-dir "$BENCHRUN_DIR" \
+        --run-id "$BENCHRUN_RUN_ID" \
+        --db-name "$1" \
+        --db-user "$DB_USERNAME" \
+        --target-table "$TARGET_TABLE"
+}
+
+benchrun_python() {
+    local db_name="$1"
+    shift
+
+    if [ "$BENCHRUN_STARTED" != "1" ]; then
+        return 0
+    fi
+
+    python3 "$OBSERVABILITY_HELPER" "$@" \
+        --run-dir "$BENCHRUN_DIR" \
+        --run-id "$BENCHRUN_RUN_ID" \
+        --db-name "$db_name" \
+        --db-user "$DB_USERNAME" \
+        --target-table "$TARGET_TABLE"
+}
+
+benchrun_register_pid() {
+    local pid="${1:-}"
+    [ -n "$pid" ] && BENCHRUN_CHILD_PIDS+=("$pid")
+}
+
+benchrun_register_pgid() {
+    local pid="${1:-}"
+    [ -n "$pid" ] && BENCHRUN_CHILD_PGIDS+=("$pid")
+}
+
+benchrun_unregister_pid() {
+    local remove="${1:-}"
+    local pid
+    local keep=()
+    for pid in "${BENCHRUN_CHILD_PIDS[@]:-}"; do
+        [ "$pid" != "$remove" ] && keep+=("$pid")
+    done
+    BENCHRUN_CHILD_PIDS=("${keep[@]:-}")
+}
+
+benchrun_unregister_pgid() {
+    local remove="${1:-}"
+    local pid
+    local keep=()
+    for pid in "${BENCHRUN_CHILD_PGIDS[@]:-}"; do
+        [ "$pid" != "$remove" ] && keep+=("$pid")
+    done
+    BENCHRUN_CHILD_PGIDS=("${keep[@]:-}")
+}
+
+benchrun_stop_pid() {
+    local pid="${1:-}"
+    [ -z "$pid" ] && return
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    benchrun_unregister_pid "$pid"
+}
+
+benchrun_stop_pgid() {
+    local pid="${1:-}"
+    [ -z "$pid" ] && return
+    kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    benchrun_unregister_pgid "$pid"
+}
+
+benchrun_start_heartbeat() {
+    (
+        while true; do
+            printf '%s heartbeat run_id=%s\n' "$(utc_now)" "$BENCHRUN_RUN_ID" >> "$BENCHRUN_DIR/heartbeat.log"
+            sleep 60
+        done
+    ) &
+    BENCHRUN_HEARTBEAT_PID=$!
+    benchrun_register_pid "$BENCHRUN_HEARTBEAT_PID"
+}
+
+benchrun_start_os_watchers() {
+    if [ "$BENCHRUN_ENABLE_OS_WATCHERS" != "1" ]; then
+        return
+    fi
+
+    if command -v vmstat >/dev/null 2>&1; then
+        vmstat "$BENCHRUN_SAMPLE_INTERVAL_SECONDS" >> "$BENCHRUN_DIR/samples/vmstat.log" 2>> "$BENCHRUN_DIR/logs/os_watchers.log" &
+        BENCHRUN_VMSTAT_PID=$!
+        benchrun_register_pid "$BENCHRUN_VMSTAT_PID"
+    else
+        printf '%s vmstat unavailable\n' "$(utc_now)" >> "$BENCHRUN_DIR/logs/os_watchers.log"
+    fi
+
+    if command -v iostat >/dev/null 2>&1; then
+        iostat -x "$BENCHRUN_SAMPLE_INTERVAL_SECONDS" >> "$BENCHRUN_DIR/samples/iostat.log" 2>> "$BENCHRUN_DIR/logs/os_watchers.log" &
+        BENCHRUN_IOSTAT_PID=$!
+        benchrun_register_pid "$BENCHRUN_IOSTAT_PID"
+    else
+        printf '%s iostat unavailable\n' "$(utc_now)" >> "$BENCHRUN_DIR/logs/os_watchers.log"
+    fi
+}
+
+benchrun_copy_existing_outputs() {
+    [ "$BENCHRUN_STARTED" = "1" ] || return
+    [ "$BENCHRUN_DRY_RUN_PREFLIGHT" = "1" ] && return
+
+    mkdir -p "$BENCHRUN_DIR/ycsb" "$BENCHRUN_DIR/logs"
+    [ -f "$LOG_FILE" ] && benchrun_copy_sanitized_file "$LOG_FILE" "$BENCHRUN_DIR/logs/$(basename "$LOG_FILE")" || true
+    [ -f "$PLAN_LOG" ] && benchrun_copy_sanitized_file "$PLAN_LOG" "$BENCHRUN_DIR/logs/$(basename "$PLAN_LOG")" || true
+    [ -f "$OUTPUT_FILE" ] && benchrun_copy_sanitized_file "$OUTPUT_FILE" "$BENCHRUN_DIR/ycsb/$(basename "$OUTPUT_FILE")" || true
+    [ -f "$OUTPUT_CSV" ] && benchrun_copy_sanitized_file "$OUTPUT_CSV" "$BENCHRUN_DIR/ycsb/latest_ycsb_output.txt" || true
+    [ -f "$KEY_SIZE_LOG" ] && benchrun_copy_sanitized_file "$KEY_SIZE_LOG" "$BENCHRUN_DIR/ycsb/$(basename "$KEY_SIZE_LOG")" || true
+    [ -f "$KEY_SIZE_FILE_AFTER_EXTEND" ] && benchrun_copy_sanitized_file "$KEY_SIZE_FILE_AFTER_EXTEND" "$BENCHRUN_DIR/ycsb/$(basename "$KEY_SIZE_FILE_AFTER_EXTEND")" || true
+    [ -f "$KEY_SIZE_FILE_AFTER_RUN" ] && benchrun_copy_sanitized_file "$KEY_SIZE_FILE_AFTER_RUN" "$BENCHRUN_DIR/ycsb/$(basename "$KEY_SIZE_FILE_AFTER_RUN")" || true
+    if [ -d "$TRIGGER_DATA_DIR" ]; then
+        mkdir -p "$BENCHRUN_DIR/logs/toast_spike_trigger"
+        local trigger_file
+        for trigger_file in "$TRIGGER_DATA_DIR"/*; do
+            [ -f "$trigger_file" ] || continue
+            benchrun_copy_sanitized_file "$trigger_file" "$BENCHRUN_DIR/logs/toast_spike_trigger/$(basename "$trigger_file")" || true
+        done
+    fi
+}
+
+benchrun_cleanup() {
+    local status="${1:-$?}"
+    local pid
+
+    if [ "$BENCHRUN_STARTED" != "1" ] || [ "$BENCHRUN_CLEANED_UP" = "1" ]; then
+        return "$status"
+    fi
+    BENCHRUN_CLEANED_UP=1
+    trap - EXIT INT TERM
+
+    for pid in "${BENCHRUN_CHILD_PGIDS[@]:-}"; do
+        benchrun_stop_pgid "$pid"
+    done
+    for pid in "${BENCHRUN_CHILD_PIDS[@]:-}"; do
+        benchrun_stop_pid "$pid"
+    done
+
+    benchrun_copy_existing_outputs
+    if [ "$BENCHRUN_SKIP_DERIVED_ANALYSIS" != "1" ]; then
+        benchrun_python "$DB_NAME" derive >/dev/null 2>> "$BENCHRUN_DIR/logs/observability_errors.log" || true
+    fi
+    benchrun_python "$DB_NAME" manifest-finish --exit-status "$status" >/dev/null 2>> "$BENCHRUN_DIR/logs/observability_errors.log" || true
+    return "$status"
+}
+
+benchrun_init() {
+    if [ "$BENCHRUN_STARTED" = "1" ]; then
+        return
+    fi
+
+    if [ -z "$BENCHRUN_RUN_ID" ]; then
+        BENCHRUN_RUN_ID="${RUN_NAME}_$(date -u +%Y%m%dT%H%M%SZ)"
+    fi
+    BENCHRUN_DIR="${BENCHRUN_OUTPUT_DIR%/}/$BENCHRUN_RUN_ID"
+    mkdir -p "$BENCHRUN_DIR/sql" "$BENCHRUN_DIR/snapshots" "$BENCHRUN_DIR/samples" "$BENCHRUN_DIR/ycsb" "$BENCHRUN_DIR/derived" "$BENCHRUN_DIR/logs"
+    BENCHRUN_STARTED=1
+
+    exec > >(benchrun_redact_stream | tee -a "$BENCHRUN_DIR/stdout.log") 2> >(benchrun_redact_stream | tee -a "$BENCHRUN_DIR/stderr.log" >&2)
+
+    benchrun_python "$DB_NAME" manifest-init \
+        --script-path "$0" \
+        --repo-root "$YCSB_HOME/.." \
+        --workload-file "$WORKLOAD_FILE" \
+        --command-line "$ORIGINAL_COMMAND_LINE" \
+        --db-url "$DB_URL" \
+        --type-name "$TYPE" \
+        --dist "$DIST" \
+        --scale "$SCALE" \
+        --work "$WORK" \
+        --run-number "$RUN" \
+        --sample-interval-seconds "$BENCHRUN_SAMPLE_INTERVAL_SECONDS" \
+        --relation-size-sample-interval-seconds "$BENCHRUN_RELATION_SIZE_SAMPLE_INTERVAL_SECONDS" \
+        --inspect-wal-ranges "$BENCHRUN_INSPECT_WAL_RANGES" \
+        --reset-pg-stats-before-run "$BENCHRUN_RESET_PG_STATS_BEFORE_RUN" \
+        --skip-continuous-sampling "$BENCHRUN_SKIP_CONTINUOUS_SAMPLING" \
+        --phase-value-sizes "$BENCHRUN_PHASE_VALUE_SIZES" \
+        --output-csv "$OUTPUT_CSV" \
+        --log-file "$LOG_FILE" \
+        --plan-log "$PLAN_LOG" \
+        --key-size-log "$KEY_SIZE_LOG" >/dev/null 2>> "$BENCHRUN_DIR/logs/observability_errors.log" || true
+
+    benchrun_start_heartbeat
+    benchrun_start_os_watchers
+    trap 'benchrun_cleanup $?' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
+benchrun_preflight() {
+    local db_name="${1:-$DB_NAME}"
+    benchrun_python "$db_name" preflight >/dev/null 2>> "$BENCHRUN_DIR/logs/observability_errors.log" || true
+}
+
+benchrun_maybe_reset_stats() {
+    if [ "$BENCHRUN_RESET_PG_STATS_BEFORE_RUN" != "1" ]; then
+        return
+    fi
+    benchrun_python "$DB_NAME" reset-stats >/dev/null 2>> "$BENCHRUN_DIR/logs/observability_errors.log" || true
+}
+
+benchrun_log_phase_event() {
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+    local phase_id="$5"
+    local ycsb_output="${6:-}"
+    local exit_status="${7:-}"
+    local operation_count value_size logical_bytes_per_op ycsb_copy
+
+    operation_count=$(grep -E '^operationcount=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
+    value_size=$(grep -E '^fieldlength=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
+    if [[ "$value_size" =~ ^[0-9]+$ ]]; then
+        logical_bytes_per_op=$((value_size * 10))
+    else
+        logical_bytes_per_op=""
+    fi
+    if [ -n "${LOGICAL_BYTES_PER_OP:-}" ]; then
+        logical_bytes_per_op="$LOGICAL_BYTES_PER_OP"
+    fi
+
+    ycsb_copy=""
+    if [ -n "$ycsb_output" ] && [ -f "$ycsb_output" ]; then
+        ycsb_copy="$BENCHRUN_DIR/ycsb/${phase_id}.out"
+        benchrun_copy_sanitized_file "$ycsb_output" "$ycsb_copy" 2>/dev/null || ycsb_copy="$ycsb_output"
+    fi
+
+    benchrun_python "$db_name" phase \
+        --phase-id "$phase_id" \
+        --phase-name "$phase_label" \
+        --epoch "$epoch_label" \
+        --event "$event_label" \
+        --operation-count "$operation_count" \
+        --value-size-bytes "$value_size" \
+        --logical-bytes-per-op "$logical_bytes_per_op" \
+        --ycsb-output "$ycsb_copy" \
+        --exit-status "$exit_status" >/dev/null 2>> "$BENCHRUN_DIR/logs/observability_errors.log" || true
+}
+
+benchrun_start_phase() {
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local phase_id
+
+    [ "$BENCHRUN_STARTED" = "1" ] || return
+    phase_id=$(benchrun_phase_id "$db_name" "$phase_label" "$epoch_label")
+    BENCHRUN_CURRENT_PHASE_ID="$phase_id"
+    benchrun_log_phase_event "$db_name" "$phase_label" "$epoch_label" "before" "$phase_id"
+    benchrun_python "$db_name" snapshot --phase-id "$phase_id" --label before >/dev/null 2>> "$BENCHRUN_DIR/logs/observability_errors.log" || true
+
+    if [ "$BENCHRUN_SKIP_CONTINUOUS_SAMPLING" != "1" ]; then
+        python3 "$OBSERVABILITY_HELPER" sample \
+            --run-dir "$BENCHRUN_DIR" \
+            --run-id "$BENCHRUN_RUN_ID" \
+            --db-name "$db_name" \
+            --db-user "$DB_USERNAME" \
+            --target-table "$TARGET_TABLE" \
+            --phase-id "$phase_id" \
+            --sample-interval-seconds "$BENCHRUN_SAMPLE_INTERVAL_SECONDS" \
+            --relation-size-sample-interval-seconds "$BENCHRUN_RELATION_SIZE_SAMPLE_INTERVAL_SECONDS" \
+            >/dev/null 2>> "$BENCHRUN_DIR/logs/sampler_errors.log" &
+        BENCHRUN_PHASE_SAMPLER_PID=$!
+        benchrun_register_pid "$BENCHRUN_PHASE_SAMPLER_PID"
+    fi
+}
+
+benchrun_stop_phase_sampler() {
+    if [ -n "${BENCHRUN_PHASE_SAMPLER_PID:-}" ]; then
+        benchrun_stop_pid "$BENCHRUN_PHASE_SAMPLER_PID"
+        BENCHRUN_PHASE_SAMPLER_PID=""
+    fi
+}
+
+benchrun_finish_phase() {
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local ycsb_output="${4:-}"
+    local exit_status="${5:-}"
+    local phase_id
+
+    [ "$BENCHRUN_STARTED" = "1" ] || return
+    phase_id="${BENCHRUN_CURRENT_PHASE_ID:-$(benchrun_phase_id "$db_name" "$phase_label" "$epoch_label")}"
+    benchrun_stop_phase_sampler
+    benchrun_log_phase_event "$db_name" "$phase_label" "$epoch_label" "after" "$phase_id" "$ycsb_output" "$exit_status"
+    benchrun_python "$db_name" snapshot --phase-id "$phase_id" --label after >/dev/null 2>> "$BENCHRUN_DIR/logs/observability_errors.log" || true
+    BENCHRUN_CURRENT_PHASE_ID=""
 }
 
 init_spike_trigger_trace() {
@@ -418,6 +1004,21 @@ init_spike_trigger_trace() {
     {
         echo "run_name,epoch,phase,event,timestamp_unix_ms,relation_name,buffers,bytes"
     } > "$BUFFER_RESIDENCY_FILE"
+    {
+        echo "run_name,epoch,phase,event,timestamp_unix_ms,relation_role,relation_name,relation_oid,relfilenode,relforknumber,relblocknumber,usagecount,isdirty,pinning_backends,bufferid"
+    } > "$BUFFER_PAGE_IDENTITY_FILE"
+    {
+        echo "run_name,epoch,phase,event,timestamp_unix_ms,relation_role,relation_name,relation_oid,relfilenode,relation_pages,sampled_pages,sample_step,estimated_free_bytes,avg_free_bytes,p50_free_bytes,p90_free_bytes,p99_free_bytes,estimated_pages_gt_half_free,max_free_bytes"
+    } > "$FREESPACE_SUMMARY_FILE"
+    {
+        echo "run_name,epoch,phase,event,timestamp_unix_ms,source,userid,dbid,queryid,calls,total_exec_time,mean_exec_time,max_exec_time,stddev_exec_time,rows,shared_blks_hit,shared_blks_read,shared_blks_dirtied,shared_blks_written,blk_read_time,blk_write_time,temp_blks_read,temp_blks_written,wal_records,wal_bytes,query"
+    } > "$PG_STAT_STATEMENTS_FILE"
+    {
+        echo "run_name,epoch,phase,event,timestamp_unix_ms,db_name,lsn,wal_bytes_since_start,source,message"
+    } > "$WAL_BOUNDS_FILE"
+    {
+        echo "run_name,epoch,phase,event,timestamp_unix_ms,db_name,start_lsn,end_lsn,wal_bytes,source,resource_manager_record_type,count,count_percentage,record_size,record_size_percentage,fpi_size,fpi_size_percentage,combined_size,combined_size_percentage,message"
+    } > "$WAL_STATS_FILE"
     {
         echo "run_name,epoch,phase,timestamp_unix_ms,probe_label,ycsb_key,size_bytes"
     } > "$SAMPLED_DETOAST_PROBE_LOG"
@@ -481,6 +1082,546 @@ record_checkpoint_observation() {
     [ -z "$row" ] && row="NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL"
     echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,$row" >> "$CHECKPOINT_OBSERVATIONS_FILE"
     collect_checkpoint_log_messages "$phase_label" "$epoch_label" "$event_label"
+}
+
+pg_stat_statements_schema() {
+    local db_name="$1"
+
+    PGPASSWORD="$PG_EXTENSION_PWD" psql -X -q -t -A \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_stat_statements';
+    " 2>/dev/null || true
+}
+
+record_pg_stat_statements_status_row() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_PG_STAT_STATEMENTS_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local phase_label="$1"
+    local epoch_label="$2"
+    local event_label="$3"
+    local source_label="$4"
+    local message="${5:-}"
+    local ts_ms i
+
+    ts_ms=$(timestamp_ms)
+    {
+        csv_escape "$RUN_NAME"; printf ','
+        printf '%s,%s,%s,%s,' "$epoch_label" "$phase_label" "$event_label" "$ts_ms"
+        csv_escape "$source_label"
+        i=0
+        while [ "$i" -lt 19 ]; do
+            printf ',NULL'
+            i=$((i + 1))
+        done
+        printf ','
+        csv_escape "$message"
+        printf '\n'
+    } >> "$PG_STAT_STATEMENTS_FILE"
+}
+
+reset_pg_stat_statements() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] \
+        || [ "$SPIKE_TRIGGER_PG_STAT_STATEMENTS_ENABLED" != "1" ] \
+        || [ "$SPIKE_TRIGGER_PG_STAT_STATEMENTS_RESET_PER_PHASE" != "1" ]
+    then
+        return
+    fi
+
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+    local statements_schema psql_output psql_status had_errexit
+
+    statements_schema=$(pg_stat_statements_schema "$db_name")
+    if [ -z "$statements_schema" ]; then
+        record_pg_stat_statements_status_row "$phase_label" "$epoch_label" "$event_label" "pg_stat_statements_unavailable" "extension not installed in $db_name"
+        return
+    fi
+
+    had_errexit=0
+    case $- in
+        *e*) had_errexit=1; set +e ;;
+    esac
+    psql_output=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -X -q -t -A -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "SELECT ${statements_schema}.pg_stat_statements_reset();" 2>&1)
+    psql_status=$?
+    if [ "$had_errexit" -eq 1 ]; then
+        set -e
+    fi
+
+    if [ "$psql_status" -ne 0 ]; then
+        record_pg_stat_statements_status_row "$phase_label" "$epoch_label" "$event_label" "pg_stat_statements_reset_failed" "$psql_output"
+        return
+    fi
+
+    record_pg_stat_statements_status_row "$phase_label" "$epoch_label" "$event_label" "pg_stat_statements_reset" "reset ok"
+}
+
+record_pg_stat_statements() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_PG_STAT_STATEMENTS_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+    local ts_ms statements_schema top_n query_filter rows_output psql_status had_errexit
+    local userid dbid queryid calls total_exec_time mean_exec_time max_exec_time stddev_exec_time
+    local rows_count shared_blks_hit shared_blks_read shared_blks_dirtied shared_blks_written
+    local blk_read_time blk_write_time temp_blks_read temp_blks_written wal_records wal_bytes query_text
+
+    statements_schema=$(pg_stat_statements_schema "$db_name")
+    if [ -z "$statements_schema" ]; then
+        record_pg_stat_statements_status_row "$phase_label" "$epoch_label" "$event_label" "pg_stat_statements_unavailable" "extension not installed in $db_name"
+        return
+    fi
+
+    top_n="$SPIKE_TRIGGER_PG_STAT_STATEMENTS_TOP_N"
+    if ! [[ "$top_n" =~ ^[0-9]+$ ]] || [ "$top_n" -lt 1 ]; then
+        top_n=25
+    fi
+    query_filter="$SPIKE_TRIGGER_PG_STAT_STATEMENTS_QUERY_FILTER"
+    ts_ms=$(timestamp_ms)
+
+    had_errexit=0
+    case $- in
+        *e*) had_errexit=1; set +e ;;
+    esac
+    rows_output=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -X -q -t -A -F $'\t' -v ON_ERROR_STOP=1 \
+        -v query_filter="$query_filter" \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" -c "
+        WITH stats AS (
+            SELECT s.userid::text AS userid,
+                   s.dbid::text AS dbid,
+                   s.query,
+                   to_jsonb(s) AS js
+            FROM ${statements_schema}.pg_stat_statements s
+            WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND (:'query_filter' = '' OR s.query ILIKE '%' || :'query_filter' || '%')
+              AND s.query NOT ILIKE '%pg_stat_statements%'
+        )
+        SELECT userid,
+               dbid,
+               COALESCE(js->>'queryid', 'NULL'),
+               COALESCE(js->>'calls', 'NULL'),
+               COALESCE(js->>'total_exec_time', js->>'total_time', 'NULL'),
+               COALESCE(js->>'mean_exec_time', js->>'mean_time', 'NULL'),
+               COALESCE(js->>'max_exec_time', js->>'max_time', 'NULL'),
+               COALESCE(js->>'stddev_exec_time', js->>'stddev_time', 'NULL'),
+               COALESCE(js->>'rows', 'NULL'),
+               COALESCE(js->>'shared_blks_hit', 'NULL'),
+               COALESCE(js->>'shared_blks_read', 'NULL'),
+               COALESCE(js->>'shared_blks_dirtied', 'NULL'),
+               COALESCE(js->>'shared_blks_written', 'NULL'),
+               COALESCE(js->>'blk_read_time', 'NULL'),
+               COALESCE(js->>'blk_write_time', 'NULL'),
+               COALESCE(js->>'temp_blks_read', 'NULL'),
+               COALESCE(js->>'temp_blks_written', 'NULL'),
+               COALESCE(js->>'wal_records', 'NULL'),
+               COALESCE(js->>'wal_bytes', 'NULL'),
+               regexp_replace(query, E'[\\t\\n\\r]+', ' ', 'g')
+        FROM stats
+        ORDER BY COALESCE(
+            NULLIF(js->>'total_exec_time', '')::numeric,
+            NULLIF(js->>'total_time', '')::numeric,
+            0
+        ) DESC
+        LIMIT $top_n;
+    " 2>&1)
+    psql_status=$?
+    if [ "$had_errexit" -eq 1 ]; then
+        set -e
+    fi
+
+    if [ "$psql_status" -ne 0 ]; then
+        record_pg_stat_statements_status_row "$phase_label" "$epoch_label" "$event_label" "pg_stat_statements_snapshot_failed" "$rows_output"
+        return
+    fi
+    if [ -z "$rows_output" ]; then
+        record_pg_stat_statements_status_row "$phase_label" "$epoch_label" "$event_label" "pg_stat_statements_empty" "no matching statements for filter '$query_filter'"
+        return
+    fi
+
+    while IFS=$'\t' read -r userid dbid queryid calls total_exec_time mean_exec_time max_exec_time stddev_exec_time \
+        rows_count shared_blks_hit shared_blks_read shared_blks_dirtied shared_blks_written \
+        blk_read_time blk_write_time temp_blks_read temp_blks_written wal_records wal_bytes query_text
+    do
+        [ -z "$userid$dbid$queryid$calls$query_text" ] && continue
+        {
+            csv_escape "$RUN_NAME"; printf ','
+            printf '%s,%s,%s,%s,snapshot,' "$epoch_label" "$phase_label" "$event_label" "$ts_ms"
+            printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,' \
+                "$userid" "$dbid" "$queryid" "$calls" "$total_exec_time" "$mean_exec_time" \
+                "$max_exec_time" "$stddev_exec_time" "$rows_count" "$shared_blks_hit" \
+                "$shared_blks_read" "$shared_blks_dirtied" "$shared_blks_written" \
+                "$blk_read_time" "$blk_write_time" "$temp_blks_read" "$temp_blks_written" \
+                "$wal_records" "$wal_bytes"
+            csv_escape "$query_text"
+            printf '\n'
+        } >> "$PG_STAT_STATEMENTS_FILE"
+    done <<< "$rows_output"
+}
+
+pg_walinspect_schema() {
+    local db_name="$1"
+
+    PGPASSWORD="$PG_EXTENSION_PWD" psql -X -q -t -A \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_walinspect';
+    " 2>/dev/null || true
+}
+
+wal_lsn_is_valid() {
+    [[ "${1:-}" =~ ^[0-9A-Fa-f]+/[0-9A-Fa-f]+$ ]]
+}
+
+record_wal_boundary_row() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_WALINSPECT_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local phase_label="$1"
+    local epoch_label="$2"
+    local event_label="$3"
+    local db_name="$4"
+    local lsn="${5:-NULL}"
+    local wal_bytes="${6:-NULL}"
+    local source_label="$7"
+    local message="${8:-}"
+    local ts_ms
+
+    [ -z "$lsn" ] && lsn="NULL"
+    [ -z "$wal_bytes" ] && wal_bytes="NULL"
+    ts_ms=$(timestamp_ms)
+
+    {
+        csv_escape "$RUN_NAME"; printf ','
+        printf '%s,%s,%s,%s,' "$epoch_label" "$phase_label" "$event_label" "$ts_ms"
+        csv_escape "$db_name"; printf ','
+        printf '%s,%s,' "$lsn" "$wal_bytes"
+        csv_escape "$source_label"; printf ','
+        csv_escape "$message"; printf '\n'
+    } >> "$WAL_BOUNDS_FILE"
+}
+
+record_wal_stats_status_row() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_WALINSPECT_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+    local start_lsn="${5:-NULL}"
+    local end_lsn="${6:-NULL}"
+    local wal_bytes="${7:-NULL}"
+    local source_label="$8"
+    local message="${9:-}"
+    local ts_ms i
+
+    [ -z "$start_lsn" ] && start_lsn="NULL"
+    [ -z "$end_lsn" ] && end_lsn="NULL"
+    [ -z "$wal_bytes" ] && wal_bytes="NULL"
+    ts_ms=$(timestamp_ms)
+
+    {
+        csv_escape "$RUN_NAME"; printf ','
+        printf '%s,%s,%s,%s,' "$epoch_label" "$phase_label" "$event_label" "$ts_ms"
+        csv_escape "$db_name"; printf ','
+        printf '%s,%s,%s,' "$start_lsn" "$end_lsn" "$wal_bytes"
+        csv_escape "$source_label"
+        i=0
+        while [ "$i" -lt 9 ]; do
+            printf ',NULL'
+            i=$((i + 1))
+        done
+        printf ','
+        csv_escape "$message"
+        printf '\n'
+    } >> "$WAL_STATS_FILE"
+}
+
+wal_lsn_diff_bytes() {
+    local db_name="$1"
+    local start_lsn="$2"
+    local end_lsn="$3"
+    local diff_output psql_status had_errexit
+
+    if ! wal_lsn_is_valid "$start_lsn" || ! wal_lsn_is_valid "$end_lsn"; then
+        echo ""
+        return 0
+    fi
+
+    had_errexit=0
+    case $- in
+        *e*) had_errexit=1; set +e ;;
+    esac
+    diff_output=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -X -q -t -A -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "SELECT pg_wal_lsn_diff('$end_lsn'::pg_lsn, '$start_lsn'::pg_lsn)::numeric::bigint;" 2>&1)
+    psql_status=$?
+    if [ "$had_errexit" -eq 1 ]; then
+        set -e
+    fi
+
+    if [ "$psql_status" -ne 0 ] || ! [[ "$diff_output" =~ ^-?[0-9]+$ ]]; then
+        echo ""
+        return 0
+    fi
+
+    echo "$diff_output"
+}
+
+record_wal_boundary() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_WALINSPECT_ENABLED" != "1" ]; then
+        echo ""
+        return 0
+    fi
+
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+    local start_lsn="${5:-}"
+    local current_lsn psql_status had_errexit wal_bytes
+
+    had_errexit=0
+    case $- in
+        *e*) had_errexit=1; set +e ;;
+    esac
+    current_lsn=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -X -q -t -A -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "SELECT pg_current_wal_lsn();" 2>&1)
+    psql_status=$?
+    if [ "$had_errexit" -eq 1 ]; then
+        set -e
+    fi
+
+    if [ "$psql_status" -ne 0 ] || ! wal_lsn_is_valid "$current_lsn"; then
+        record_wal_boundary_row "$phase_label" "$epoch_label" "$event_label" "$db_name" "NULL" "NULL" "wal_lsn_failed" "$current_lsn"
+        echo ""
+        return 0
+    fi
+
+    wal_bytes="NULL"
+    if wal_lsn_is_valid "$start_lsn"; then
+        wal_bytes=$(wal_lsn_diff_bytes "$db_name" "$start_lsn" "$current_lsn")
+        [ -z "$wal_bytes" ] && wal_bytes="NULL"
+    fi
+
+    record_wal_boundary_row "$phase_label" "$epoch_label" "$event_label" "$db_name" "$current_lsn" "$wal_bytes" "boundary" ""
+    echo "$current_lsn"
+}
+
+record_wal_stats() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_WALINSPECT_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+    local start_lsn="${5:-}"
+    local end_lsn="${6:-}"
+    local walinspect_schema wal_bytes max_bytes per_record rows_output psql_status had_errexit ts_ms
+    local resource_manager_record_type count count_percentage record_size record_size_percentage
+    local fpi_size fpi_size_percentage combined_size combined_size_percentage
+
+    if ! wal_lsn_is_valid "$start_lsn" || ! wal_lsn_is_valid "$end_lsn"; then
+        record_wal_stats_status_row "$db_name" "$phase_label" "$epoch_label" "$event_label" "$start_lsn" "$end_lsn" "NULL" "walinspect_missing_bounds" "start or end LSN was not captured"
+        return
+    fi
+
+    walinspect_schema=$(pg_walinspect_schema "$db_name")
+    if [ -z "$walinspect_schema" ]; then
+        record_wal_stats_status_row "$db_name" "$phase_label" "$epoch_label" "$event_label" "$start_lsn" "$end_lsn" "NULL" "pg_walinspect_unavailable" "extension not installed in $db_name"
+        return
+    fi
+
+    wal_bytes=$(wal_lsn_diff_bytes "$db_name" "$start_lsn" "$end_lsn")
+    if [ -z "$wal_bytes" ]; then
+        record_wal_stats_status_row "$db_name" "$phase_label" "$epoch_label" "$event_label" "$start_lsn" "$end_lsn" "NULL" "walinspect_lsn_diff_failed" "could not calculate WAL bytes for phase"
+        return
+    fi
+    if [ "$wal_bytes" -le 0 ]; then
+        record_wal_stats_status_row "$db_name" "$phase_label" "$epoch_label" "$event_label" "$start_lsn" "$end_lsn" "$wal_bytes" "walinspect_empty_range" "no WAL generated between phase boundaries"
+        return
+    fi
+
+    max_bytes="$SPIKE_TRIGGER_WALINSPECT_MAX_BYTES"
+    if ! [[ "$max_bytes" =~ ^[0-9]+$ ]]; then
+        max_bytes=0
+    fi
+    if [ "$max_bytes" -gt 0 ] && [ "$wal_bytes" -gt "$max_bytes" ]; then
+        record_wal_stats_status_row "$db_name" "$phase_label" "$epoch_label" "$event_label" "$start_lsn" "$end_lsn" "$wal_bytes" "walinspect_skipped_range_too_large" "WAL range exceeds SPIKE_TRIGGER_WALINSPECT_MAX_BYTES=$max_bytes"
+        return
+    fi
+
+    per_record=false
+    if [ "$SPIKE_TRIGGER_WALINSPECT_PER_RECORD" = "1" ]; then
+        per_record=true
+    fi
+    ts_ms=$(timestamp_ms)
+
+    had_errexit=0
+    case $- in
+        *e*) had_errexit=1; set +e ;;
+    esac
+    rows_output=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -X -q -t -A -F $'\t' -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" -c "
+        WITH stats AS (
+            SELECT to_jsonb(w) AS js
+            FROM ${walinspect_schema}.pg_get_wal_stats('$start_lsn'::pg_lsn, '$end_lsn'::pg_lsn, $per_record) AS w
+        )
+        SELECT COALESCE(NULLIF(js->>'resource_manager/record_type', ''), NULLIF(concat_ws('/', js->>'resource_manager', js->>'record_type'), ''), 'NULL'),
+               COALESCE(js->>'count', 'NULL'),
+               COALESCE(js->>'count_percentage', 'NULL'),
+               COALESCE(js->>'record_size', 'NULL'),
+               COALESCE(js->>'record_size_percentage', 'NULL'),
+               COALESCE(js->>'fpi_size', 'NULL'),
+               COALESCE(js->>'fpi_size_percentage', 'NULL'),
+               COALESCE(js->>'combined_size', 'NULL'),
+               COALESCE(js->>'combined_size_percentage', 'NULL')
+        FROM stats
+        ORDER BY COALESCE(NULLIF(js->>'combined_size', '')::numeric, 0) DESC;
+    " 2>&1)
+    psql_status=$?
+    if [ "$had_errexit" -eq 1 ]; then
+        set -e
+    fi
+
+    if [ "$psql_status" -ne 0 ]; then
+        record_wal_stats_status_row "$db_name" "$phase_label" "$epoch_label" "$event_label" "$start_lsn" "$end_lsn" "$wal_bytes" "walinspect_snapshot_failed" "$rows_output"
+        return
+    fi
+    if [ -z "$rows_output" ]; then
+        record_wal_stats_status_row "$db_name" "$phase_label" "$epoch_label" "$event_label" "$start_lsn" "$end_lsn" "$wal_bytes" "walinspect_empty_stats" "pg_get_wal_stats returned no rows"
+        return
+    fi
+
+    while IFS=$'\t' read -r resource_manager_record_type count count_percentage record_size record_size_percentage \
+        fpi_size fpi_size_percentage combined_size combined_size_percentage
+    do
+        [ -z "$resource_manager_record_type$count$record_size$combined_size" ] && continue
+        {
+            csv_escape "$RUN_NAME"; printf ','
+            printf '%s,%s,%s,%s,' "$epoch_label" "$phase_label" "$event_label" "$ts_ms"
+            csv_escape "$db_name"; printf ','
+            printf '%s,%s,%s,snapshot,' "$start_lsn" "$end_lsn" "$wal_bytes"
+            csv_escape "$resource_manager_record_type"; printf ','
+            printf '%s,%s,%s,%s,%s,%s,%s,%s,' \
+                "$count" "$count_percentage" "$record_size" "$record_size_percentage" \
+                "$fpi_size" "$fpi_size_percentage" "$combined_size" "$combined_size_percentage"
+            printf '\n'
+        } >> "$WAL_STATS_FILE"
+    done <<< "$rows_output"
+}
+
+list_contains_word() {
+    local list="$1"
+    local needle="$2"
+    local word
+
+    for word in $list; do
+        if [ "$word" = "$needle" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+epoch_in_ranges() {
+    local epoch_label="$1"
+    local ranges="$2"
+    local item start end
+
+    if ! [[ "$epoch_label" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+
+    for item in $ranges; do
+        if [[ "$item" =~ ^[0-9]+-[0-9]+$ ]]; then
+            start=${item%-*}
+            end=${item#*-}
+            if [ "$epoch_label" -ge "$start" ] && [ "$epoch_label" -le "$end" ]; then
+                return 0
+            fi
+        elif [[ "$item" =~ ^[0-9]+$ ]] && [ "$epoch_label" -eq "$item" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+should_capture_page_identity() {
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_PAGE_IDENTITY_ENABLED" != "1" ]; then
+        return 1
+    fi
+
+    # Keep page-identity capture scoped to the primary benchmark database by default.
+    # Control/read-only phases use the relation-level snapshot without the heavier page listing.
+    if [ "$db_name" != "$DB_NAME" ]; then
+        return 1
+    fi
+
+    if list_contains_word "$SPIKE_TRIGGER_PAGE_IDENTITY_BASE_EVENTS" "$event_label"; then
+        return 0
+    fi
+
+    if epoch_in_ranges "$epoch_label" "$SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EPOCHS" \
+        && list_contains_word "$SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EVENTS" "$event_label"
+    then
+        return 0
+    fi
+
+    return 1
+}
+
+should_capture_freespace() {
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_FREESPACE_ENABLED" != "1" ]; then
+        return 1
+    fi
+
+    # Fragmentation evidence is only needed for the growing primary database.
+    if [ "$db_name" != "$DB_NAME" ]; then
+        return 1
+    fi
+
+    if list_contains_word "$SPIKE_TRIGGER_FREESPACE_BASE_EVENTS" "$event_label"; then
+        return 0
+    fi
+
+    if epoch_in_ranges "$epoch_label" "$SPIKE_TRIGGER_FREESPACE_FOCUS_EPOCHS" \
+        && list_contains_word "$SPIKE_TRIGGER_FREESPACE_FOCUS_EVENTS" "$event_label"
+    then
+        return 0
+    fi
+
+    return 1
 }
 
 record_buffer_residency() {
@@ -547,6 +1688,239 @@ record_buffer_residency() {
     while IFS= read -r row; do
         echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,$row" >> "$BUFFER_RESIDENCY_FILE"
     done <<< "$rows"
+}
+
+record_buffer_page_identity() {
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+    local ts_ms buffercache_schema rows sample_mod min_usagecount
+
+    if ! should_capture_page_identity "$db_name" "$phase_label" "$epoch_label" "$event_label"; then
+        return
+    fi
+
+    ts_ms=$(timestamp_ms)
+    sample_mod="$SPIKE_TRIGGER_PAGE_IDENTITY_SAMPLE_MOD"
+    min_usagecount="$SPIKE_TRIGGER_PAGE_IDENTITY_MIN_USAGECOUNT"
+
+    if ! [[ "$sample_mod" =~ ^[0-9]+$ ]] || [ "$sample_mod" -lt 1 ]; then
+        sample_mod=32
+    fi
+    if ! [[ "$min_usagecount" =~ ^[0-9]+$ ]]; then
+        min_usagecount=4
+    fi
+
+    buffercache_schema=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -At -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_buffercache';
+    " 2>/dev/null || true)
+    if [ -z "$buffercache_schema" ]; then
+        echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,pg_buffercache_unavailable,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL" >> "$BUFFER_PAGE_IDENTITY_FILE"
+        return
+    fi
+
+    rows=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -At -F"," -c "
+        WITH current_db AS (
+            SELECT oid
+            FROM pg_database
+            WHERE datname = current_database()
+        ),
+        heap AS (
+            SELECT c.oid AS heap_oid,
+                   c.relname AS heap_name,
+                   c.reltoastrelid AS toast_oid
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relname = 'usertable'
+            ORDER BY n.nspname = 'public' DESC, n.nspname
+            LIMIT 1
+        ),
+        rels AS (
+            SELECT 'heap' AS relation_role, heap_oid AS rel_oid, heap_name AS relation_name
+            FROM heap
+            UNION ALL
+            SELECT 'toast_heap', t.oid, t.relname
+            FROM heap h
+            JOIN pg_class t ON t.oid = h.toast_oid
+            WHERE h.toast_oid <> 0
+            UNION ALL
+            SELECT 'toast_index', i.indexrelid, ci.relname
+            FROM heap h
+            JOIN pg_index i ON i.indrelid = h.toast_oid
+            JOIN pg_class ci ON ci.oid = i.indexrelid
+            WHERE h.toast_oid <> 0
+        ),
+        rel_map AS (
+            SELECT relation_role,
+                   relation_name,
+                   rel_oid,
+                   pg_relation_filenode(rel_oid) AS relfilenode
+            FROM rels
+        )
+        SELECT rel_map.relation_role,
+               rel_map.relation_name,
+               rel_map.rel_oid,
+               rel_map.relfilenode,
+               b.relforknumber,
+               b.relblocknumber,
+               COALESCE(b.usagecount, -1),
+               COALESCE(b.isdirty, false),
+               COALESCE(b.pinning_backends, 0),
+               b.bufferid
+        FROM rel_map
+        JOIN ${buffercache_schema}.pg_buffercache b
+          ON b.relfilenode = rel_map.relfilenode
+         AND b.reldatabase = (SELECT oid FROM current_db)
+        WHERE rel_map.relfilenode IS NOT NULL
+          AND b.relblocknumber IS NOT NULL
+          AND b.relforknumber = 0
+          AND (
+              $sample_mod <= 1
+              OR (b.relblocknumber % $sample_mod) = 0
+              OR COALESCE(b.usagecount, 0) >= $min_usagecount
+          )
+        ORDER BY rel_map.relation_role, b.relblocknumber, b.bufferid;
+    " 2>/dev/null || true)
+
+    if [ -z "$rows" ]; then
+        echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,pg_buffercache_empty,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL" >> "$BUFFER_PAGE_IDENTITY_FILE"
+        return
+    fi
+
+    while IFS= read -r row; do
+        echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,$row" >> "$BUFFER_PAGE_IDENTITY_FILE"
+    done <<< "$rows"
+}
+
+record_freespace_summary() {
+    local db_name="$1"
+    local phase_label="$2"
+    local epoch_label="$3"
+    local event_label="$4"
+    local ts_ms freespacemap_schema rows max_sample_pages
+
+    if ! should_capture_freespace "$db_name" "$phase_label" "$epoch_label" "$event_label"; then
+        return
+    fi
+
+    ts_ms=$(timestamp_ms)
+    max_sample_pages="$SPIKE_TRIGGER_FREESPACE_SAMPLE_MAX_PAGES"
+
+    if ! [[ "$max_sample_pages" =~ ^[0-9]+$ ]]; then
+        max_sample_pages=4096
+    fi
+
+    freespacemap_schema=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -At -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_freespacemap';
+    " 2>/dev/null || true)
+    if [ -z "$freespacemap_schema" ]; then
+        echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,pg_freespacemap_unavailable,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL" >> "$FREESPACE_SUMMARY_FILE"
+        return
+    fi
+
+    rows=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -At -F"," -c "
+        WITH heap AS (
+            SELECT c.oid AS heap_oid,
+                   c.relname AS heap_name,
+                   c.reltoastrelid AS toast_oid
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relname = 'usertable'
+            ORDER BY n.nspname = 'public' DESC, n.nspname
+            LIMIT 1
+        ),
+        rels AS (
+            SELECT 'heap' AS relation_role, heap_oid AS rel_oid, heap_name AS relation_name
+            FROM heap
+            UNION ALL
+            SELECT 'toast_heap', t.oid, t.relname
+            FROM heap h
+            JOIN pg_class t ON t.oid = h.toast_oid
+            WHERE h.toast_oid <> 0
+        ),
+        rel_map AS (
+            SELECT relation_role,
+                   relation_name,
+                   rel_oid,
+                   pg_relation_filenode(rel_oid) AS relfilenode,
+                   current_setting('block_size')::int AS block_size,
+                   CEIL(pg_relation_size(rel_oid)::numeric / current_setting('block_size')::int)::bigint AS relation_pages
+            FROM rels
+        ),
+        sampled AS (
+            SELECT rel_map.relation_role,
+                   rel_map.relation_name,
+                   rel_map.rel_oid,
+                   rel_map.relfilenode,
+                   rel_map.block_size,
+                   rel_map.relation_pages,
+                   CASE
+                       WHEN $max_sample_pages = 0 THEN 1::bigint
+                       ELSE GREATEST(1::bigint, CEIL(rel_map.relation_pages::numeric / GREATEST($max_sample_pages, 1))::bigint)
+                   END AS sample_step,
+                   fs.blkno,
+                   fs.avail
+            FROM rel_map
+            LEFT JOIN LATERAL (
+                SELECT gs.blkno,
+                       ${freespacemap_schema}.pg_freespace(rel_map.rel_oid::regclass, gs.blkno::bigint) AS avail
+                FROM generate_series(
+                    0::bigint,
+                    GREATEST(rel_map.relation_pages - 1, 0::bigint),
+                    CASE
+                        WHEN $max_sample_pages = 0 THEN 1::bigint
+                        ELSE GREATEST(1::bigint, CEIL(rel_map.relation_pages::numeric / GREATEST($max_sample_pages, 1))::bigint)
+                    END
+                ) AS gs(blkno)
+                WHERE rel_map.relation_pages > 0
+            ) fs ON true
+        )
+        SELECT relation_role,
+               relation_name,
+               rel_oid,
+               relfilenode,
+               relation_pages,
+               COUNT(avail) AS sampled_pages,
+               sample_step,
+               CASE
+                   WHEN COUNT(avail) > 0 THEN ROUND(SUM(avail)::numeric * relation_pages::numeric / COUNT(avail))
+                   ELSE 0
+               END AS estimated_free_bytes,
+               CASE WHEN COUNT(avail) > 0 THEN ROUND(AVG(avail)::numeric, 2) ELSE NULL END AS avg_free_bytes,
+               CASE WHEN COUNT(avail) > 0 THEN ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY avail)::numeric, 2) ELSE NULL END AS p50_free_bytes,
+               CASE WHEN COUNT(avail) > 0 THEN ROUND(percentile_cont(0.90) WITHIN GROUP (ORDER BY avail)::numeric, 2) ELSE NULL END AS p90_free_bytes,
+               CASE WHEN COUNT(avail) > 0 THEN ROUND(percentile_cont(0.99) WITHIN GROUP (ORDER BY avail)::numeric, 2) ELSE NULL END AS p99_free_bytes,
+               CASE
+                   WHEN COUNT(avail) > 0 THEN ROUND(COUNT(*) FILTER (WHERE avail > block_size / 2)::numeric * relation_pages::numeric / COUNT(avail))
+                   ELSE 0
+               END AS estimated_pages_gt_half_free,
+               COALESCE(MAX(avail), 0) AS max_free_bytes
+        FROM sampled
+        GROUP BY relation_role, relation_name, rel_oid, relfilenode, relation_pages, sample_step, block_size
+        ORDER BY relation_role;
+    " 2>/dev/null || true)
+
+    if [ -z "$rows" ]; then
+        echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,pg_freespacemap_empty,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL" >> "$FREESPACE_SUMMARY_FILE"
+        return
+    fi
+
+    while IFS= read -r row; do
+        echo "$RUN_NAME,$epoch_label,$phase_label,$event_label,$ts_ms,$row" >> "$FREESPACE_SUMMARY_FILE"
+    done <<< "$rows"
+}
+
+record_buffer_snapshot() {
+    record_buffer_residency "$@"
+    record_buffer_page_identity "$@"
+    record_freespace_summary "$@"
 }
 
 start_vacuum_progress_sampler() {
@@ -658,7 +2032,7 @@ start_run_buffer_progress_sampler() {
                 if [ -z "${recorded[$pct]:-}" ]; then
                     all_recorded=0
                     if [ "$max_op" -ge "$target" ]; then
-                        record_buffer_residency "$db_name" "run" "$epoch_label" "run_progress_${pct}pct"
+                        record_buffer_snapshot "$db_name" "run" "$epoch_label" "run_progress_${pct}pct"
                         recorded[$pct]=1
                     fi
                 fi
@@ -705,6 +2079,8 @@ run_with_metrics() {
     local os_1s_file=""
     local run_buffer_sampler_pid=""
     local operation_count=""
+    local wal_start_lsn=""
+    local wal_end_lsn=""
 
     shift 4
 
@@ -719,7 +2095,10 @@ run_with_metrics() {
     mkdir -p "$INTERNAL_DATA_DIR"
     record_phase_event "$phase" "$epoch" "${phase}_start" "db=$db_name"
     record_checkpoint_observation "$db_name" "$phase" "$epoch" "${phase}_start"
-    record_buffer_residency "$db_name" "$phase" "$epoch" "before_${phase}"
+    record_buffer_snapshot "$db_name" "$phase" "$epoch" "before_${phase}"
+    reset_pg_stat_statements "$db_name" "$phase" "$epoch" "${phase}_start"
+    wal_start_lsn=$(record_wal_boundary "$db_name" "$phase" "$epoch" "${phase}_start")
+    benchrun_start_phase "$db_name" "$phase" "$epoch"
 
     # Start watcher
     setsid env \
@@ -734,20 +2113,20 @@ run_with_metrics() {
         OS_1S_FILE="$os_1s_file" \
         OS_DISK_DEVICE_FILE="$OS_DISK_DEVICE_FILE" \
         OS_DISK_DEVICES="$OS_DISK_DEVICES" \
-        DB_STATS_TABLE="usertable" \
+        DB_STATS_TABLE="$TARGET_TABLE" \
         DB_STATS_INTERVAL="$DB_STATS_INTERVAL" \
         INTERVAL=1 \
         ./watcher.sh &
     watcher_pid=$!
+    benchrun_register_pgid "$watcher_pid"
 
     if [ "$phase" = "run" ] && [ "$SPIKE_TRIGGER_TRACE_ENABLED" = "1" ]; then
         operation_count=$(grep -E '^operationcount=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
         run_buffer_sampler_pid=$(start_run_buffer_progress_sampler "$db_name" "$epoch" "$operation_count")
+        benchrun_register_pid "$run_buffer_sampler_pid"
     fi
 
-    trap 'kill -TERM -$watcher_pid 2>/dev/null; stop_background_pid "$run_buffer_sampler_pid"' EXIT INT TERM
-
-    "$@" > "$output_csv"
+    "$@" | benchrun_redact_stream > "$output_csv"
     status=$?
 
     wait_background_pid_with_timeout "$run_buffer_sampler_pid" 5
@@ -759,9 +2138,16 @@ run_with_metrics() {
     wait $watcher_pid 2>/dev/null
 
     trap - EXIT INT TERM
+    trap 'benchrun_cleanup $?' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
+    benchrun_finish_phase "$db_name" "$phase" "$epoch" "$output_csv" "$status"
+    wal_end_lsn=$(record_wal_boundary "$db_name" "$phase" "$epoch" "${phase}_end" "$wal_start_lsn")
+    record_wal_stats "$db_name" "$phase" "$epoch" "${phase}_end" "$wal_start_lsn" "$wal_end_lsn"
+    record_pg_stat_statements "$db_name" "$phase" "$epoch" "${phase}_end"
     record_checkpoint_observation "$db_name" "$phase" "$epoch" "${phase}_end"
-    record_buffer_residency "$db_name" "$phase" "$epoch" "after_${phase}"
+    record_buffer_snapshot "$db_name" "$phase" "$epoch" "after_${phase}"
     record_phase_event "$phase" "$epoch" "${phase}_end" "db=$db_name exit=$status"
     echo "Finished $db_name phase=$phase epoch=$epoch (exit=$status)"
     set -e
@@ -784,7 +2170,7 @@ record_db_stats_once() {
         epoch="$epoch_label" \
         metrics_file="$metrics_file" \
         DB_STATS_FILE="$db_stats_file" \
-        DB_STATS_TABLE="usertable" \
+        DB_STATS_TABLE="$TARGET_TABLE" \
         ONESHOT_DBSTATS=1 \
         ./watcher.sh
 }
@@ -797,6 +2183,9 @@ initialize_database() {
     PGPASSWORD="$DB_PWD" dropdb --if-exists "$db_name" -U "$DB_USERNAME"
     PGPASSWORD="$DB_PWD" createdb "$db_name" -U "$DB_USERNAME"
     ensure_pg_buffercache_extension "$db_name"
+    ensure_pg_freespacemap_extension "$db_name"
+    ensure_pg_stat_statements_extension "$db_name"
+    ensure_pg_walinspect_extension "$db_name"
 
     PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -c \
         "CREATE TABLE usertable (
@@ -807,6 +2196,13 @@ initialize_database() {
 
     log "Done initializing $db_name."
 }
+
+benchrun_init
+if [ "$BENCHRUN_DRY_RUN_PREFLIGHT" = "1" ]; then
+    benchrun_preflight "$DB_NAME"
+    log "Dry-run preflight completed. Outputs are in $BENCHRUN_DIR"
+    exit 0
+fi
 
 # Clear the log file and previous backups
 > $LOG_FILE
@@ -825,6 +2221,8 @@ find "$INTERNAL_DATA_DIR" -maxdepth 1 -type f \
 
 initialize_database "$DB_NAME"
 initialize_database "$UNCHANGE_DB_NAME"
+benchrun_preflight "$DB_NAME"
+benchrun_maybe_reset_stats
 
 # Function to write results as a csv 
 write_result() {
@@ -1330,13 +2728,19 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
         if [[ $vacuum -eq 1 ]]; then
             record_phase_event "vacuum" "$iteration" "vacuum_start" "db=$DB_NAME"
             record_checkpoint_observation "$DB_NAME" "vacuum" "$iteration" "vacuum_start"
+            benchrun_start_phase "$DB_NAME" "vacuum" "$iteration"
+            vacuum_wal_start_lsn=$(record_wal_boundary "$DB_NAME" "vacuum" "$iteration" "vacuum_start")
             vacuum_progress_pid=$(start_vacuum_progress_sampler "$DB_NAME" "$iteration")
+            benchrun_register_pid "$vacuum_progress_pid"
             log "VACUUM start: $(date +%s)"
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c "VACUUM (ANALYZE, VERBOSE) usertable;"
             log "VACUUM end: $(date +%s)"
             stop_background_pid "$vacuum_progress_pid"
+            benchrun_finish_phase "$DB_NAME" "vacuum" "$iteration" "" "0"
+            vacuum_wal_end_lsn=$(record_wal_boundary "$DB_NAME" "vacuum" "$iteration" "vacuum_end" "$vacuum_wal_start_lsn")
+            record_wal_stats "$DB_NAME" "vacuum" "$iteration" "vacuum_end" "$vacuum_wal_start_lsn" "$vacuum_wal_end_lsn"
             record_checkpoint_observation "$DB_NAME" "vacuum" "$iteration" "vacuum_end"
-            record_buffer_residency "$DB_NAME" "vacuum" "$iteration" "after_vacuum"
+            record_buffer_snapshot "$DB_NAME" "vacuum" "$iteration" "after_vacuum"
             record_phase_event "vacuum" "$iteration" "vacuum_end" "db=$DB_NAME"
             record_db_stats_once "$DB_NAME" "post-vacuum" "$iteration"
         else
@@ -1488,6 +2892,9 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
             # Restore backup - --clean ensures tables are dropped before creation
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -f "$BACKUP_FILE" > /dev/null 2>&1 || true
             ensure_pg_buffercache_extension "$BACKUP_DB_NAME"
+            ensure_pg_freespacemap_extension "$BACKUP_DB_NAME"
+            ensure_pg_stat_statements_extension "$BACKUP_DB_NAME"
+            ensure_pg_walinspect_extension "$BACKUP_DB_NAME"
             log "Backing up the database finished"
 
             run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
@@ -1582,7 +2989,7 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
 
             # Resetting the database with new data load
             log "=== Executing the load phase for the comparison study ==="
-            $YCSB load jdbc-array-json -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" > $OUTPUT_CSV
+            $YCSB load jdbc-array-json -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" | benchrun_redact_stream > "$OUTPUT_CSV"
             total_size_comparison_load=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0)) FROM usertable;")
             log "Comparison-load verification - Epoch:$epoch Run:$run TotalSize:$total_size_comparison_load ExpectedFieldLength:$fieldlengthaverage"
             
