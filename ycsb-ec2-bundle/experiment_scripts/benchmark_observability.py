@@ -729,6 +729,8 @@ def manifest_init(args: argparse.Namespace) -> None:
             "sample_interval_seconds": args.sample_interval_seconds,
             "relation_size_sample_interval_seconds": args.relation_size_sample_interval_seconds,
             "inspect_wal_ranges": args.inspect_wal_ranges,
+            "full_visibility_profile": args.full_visibility_profile,
+            "require_full_visibility": args.require_full_visibility,
             "pg_prewarm_enabled": args.pg_prewarm_enabled,
             "pg_prewarm_mode": args.pg_prewarm_mode,
             "reset_pg_stats_before_run": args.reset_pg_stats_before_run,
@@ -768,8 +770,16 @@ def manifest_init(args: argparse.Namespace) -> None:
                 "VACUUM_ENABLED",
                 "EXTEND_OPERATIONCOUNT",
                 "FIELD_LENGTH_ORIGINAL",
+                "BENCHRUN_FULL_VISIBILITY",
+                "BENCHRUN_REQUIRE_FULL_VISIBILITY",
                 "SPIKE_TRIGGER_PREWARM_ENABLED",
                 "SPIKE_TRIGGER_PREWARM_MODE",
+                "SPIKE_TRIGGER_WALINSPECT_ENABLED",
+                "SPIKE_TRIGGER_PG_STAT_STATEMENTS_ENABLED",
+                "EXTEND_REQUESTDISTRIBUTION",
+                "RUN_REQUESTDISTRIBUTION",
+                "RUN_READPROPORTION",
+                "RUN_UPDATEPROPORTION",
             }
         },
     }
@@ -1116,6 +1126,95 @@ def read_csv_rows(path: Path) -> List[Dict[str, str]]:
         return list(csv.DictReader(fh))
 
 
+def percentile_nearest(values: List[float], percentile: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int((percentile / 100.0) * len(ordered) + 0.999999) - 1))
+    return ordered[index]
+
+
+def median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def unix_ms_to_utc(value: object) -> str:
+    try:
+        seconds = float(str(value)) / 1000.0
+        return dt.datetime.fromtimestamp(seconds, dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except Exception:
+        return ""
+
+
+def build_spike_windows(run_dir: Path, run_id: str, metadata: Dict[str, Dict[str, str]]) -> List[List[object]]:
+    phase_lookup: Dict[Tuple[str, str], str] = {}
+    for phase_id, meta in metadata.items():
+        key = (meta.get("phase_name", ""), meta.get("epoch", ""))
+        if key[0] and key[1] and key not in phase_lookup:
+            phase_lookup[key] = phase_id
+
+    grouped: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
+    sample_files = [
+        path
+        for path in sorted((run_dir / "logs" / "toast_spike_trigger").glob("*_read_sample.csv"))
+        if not path.name.endswith("_slow_read_sample.csv")
+    ]
+    for sample_path in sample_files:
+        for row in read_csv_rows(sample_path):
+            latency_us = to_float(row.get("latency_us"))
+            timestamp_ms = to_float(row.get("timestamp_unix_ms"))
+            phase = row.get("phase", "")
+            epoch = row.get("epoch", "")
+            if latency_us is None or timestamp_ms is None or not phase or not epoch:
+                continue
+            grouped.setdefault((phase, epoch), []).append(
+                {
+                    "latency_ms": latency_us / 1000.0,
+                    "timestamp_ms": timestamp_ms,
+                }
+            )
+
+    if not grouped:
+        return [[run_id, "", "", "", 0, "", "", "", "no timestamped read samples found"]]
+
+    rows: List[List[object]] = []
+    for key, samples in sorted(grouped.items()):
+        latencies = [float(sample["latency_ms"]) for sample in samples]
+        p99 = percentile_nearest(latencies, 99.0)
+        max_latency = max(latencies) if latencies else None
+        med = median(latencies)
+        deviations = [abs(value - (med or 0.0)) for value in latencies]
+        mad = median(deviations) or 0.0
+        threshold = max(value for value in [p99, (med or 0.0) + 6.0 * mad] if value is not None)
+        spikes = [sample for sample in samples if float(sample["latency_ms"]) >= threshold]
+        phase_id = phase_lookup.get(key, f"{key[0]}_{key[1]}")
+        if spikes:
+            start_ms = min(float(sample["timestamp_ms"]) for sample in spikes)
+            end_ms = max(float(sample["timestamp_ms"]) for sample in spikes)
+            rows.append(
+                [
+                    run_id,
+                    phase_id,
+                    unix_ms_to_utc(start_ms),
+                    unix_ms_to_utc(end_ms),
+                    len(spikes),
+                    fmt(max_latency),
+                    fmt(p99),
+                    key[0].upper(),
+                    f"inferred_threshold_ms={fmt(threshold)} samples={len(samples)} source=read_sample",
+                ]
+            )
+        else:
+            rows.append([run_id, phase_id, "", "", 0, fmt(max_latency), fmt(p99), key[0].upper(), f"no samples exceeded inferred_threshold_ms={fmt(threshold)}"])
+    return rows
+
+
 def read_first_data_row(path: Path) -> Dict[str, str]:
     rows = read_csv_rows(path)
     return rows[0] if rows else {}
@@ -1387,10 +1486,11 @@ def derive(args: argparse.Namespace) -> None:
 
     write_csv(derived_dir / "phase_deltas.csv", columns, [[row.get(c, "") for c in columns] for row in rows])
     write_csv(derived_dir / "normalized_metrics.csv", columns, [[row.get(c, "") for c in columns] for row in rows])
+    spike_rows = build_spike_windows(run_dir, args.run_id, metadata)
     write_csv(
         derived_dir / "spike_windows.csv",
         ["run_id", "phase_id", "start_time_utc", "end_time_utc", "spike_count", "max_latency_ms", "p99_latency_ms", "operation_type", "message"],
-        [],
+        spike_rows,
     )
 
     preflight_path = run_dir / "sql" / "preflight.json"
@@ -1423,6 +1523,7 @@ def derive(args: argparse.Namespace) -> None:
         f"- generated_utc: {utc_now()}",
         f"- postgresql_major_version: {postgres_major if postgres_major is not None else 'unknown'}",
         f"- phases_with_deltas: {len(rows)}",
+        f"- spike_windows: {sum(1 for row in spike_rows if str(row[4]) != '0')}",
         f"- unavailable_metrics: {', '.join(unavailable) if unavailable else 'none recorded'}",
         f"- expected_unavailable_metrics: {', '.join(expected_unavailable) if expected_unavailable else 'none recorded'}",
         f"- unexpected_unavailable_metrics: {', '.join(unexpected_unavailable) if unexpected_unavailable else 'none recorded'}",
@@ -1446,7 +1547,7 @@ def derive(args: argparse.Namespace) -> None:
     summary_lines.extend(
         [
             "",
-            "Spike-window alignment was skipped unless timestamped per-operation latency samples are present; the existing YCSB aggregate output does not provide wall-clock timestamps for individual operations.",
+            "Spike windows are inferred from timestamped JDBC read samples when read sampling is enabled. Treat them as alignment hints, not causal proof.",
         ]
     )
     (derived_dir / "summary.md").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
@@ -1479,6 +1580,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample-interval-seconds", default="5")
     p.add_argument("--relation-size-sample-interval-seconds", default="30")
     p.add_argument("--inspect-wal-ranges", default="0")
+    p.add_argument("--full-visibility-profile", default="0")
+    p.add_argument("--require-full-visibility", default="0")
     p.add_argument("--pg-prewarm-enabled", default="0")
     p.add_argument("--pg-prewarm-mode", default="")
     p.add_argument("--reset-pg-stats-before-run", default="0")

@@ -18,6 +18,8 @@ BENCHRUN_RELATION_SIZE_SAMPLE_INTERVAL_SECONDS="${BENCHRUN_RELATION_SIZE_SAMPLE_
 BENCHRUN_ENABLE_OS_WATCHERS="${BENCHRUN_ENABLE_OS_WATCHERS:-1}"
 BENCHRUN_RESET_PG_STATS_BEFORE_RUN="${BENCHRUN_RESET_PG_STATS_BEFORE_RUN:-0}"
 BENCHRUN_INSPECT_WAL_RANGES="${BENCHRUN_INSPECT_WAL_RANGES:-0}"
+BENCHRUN_FULL_VISIBILITY="${BENCHRUN_FULL_VISIBILITY:-0}"
+BENCHRUN_REQUIRE_FULL_VISIBILITY="${BENCHRUN_REQUIRE_FULL_VISIBILITY:-0}"
 BENCHRUN_DRY_RUN_PREFLIGHT="${BENCHRUN_DRY_RUN_PREFLIGHT:-0}"
 BENCHRUN_SKIP_CONTINUOUS_SAMPLING="${BENCHRUN_SKIP_CONTINUOUS_SAMPLING:-0}"
 BENCHRUN_SKIP_DERIVED_ANALYSIS="${BENCHRUN_SKIP_DERIVED_ANALYSIS:-0}"
@@ -39,6 +41,8 @@ Existing environment variables still work. Optional additions:
   --enable-os-watchers | --disable-os-watchers
   --reset-pg-stats-before-run
   --inspect-wal-ranges
+  --full-visibility
+  --require-full-visibility
   --pg-prewarm
   --pg-prewarm-mode MODE
   --phase-value-sizes LIST
@@ -73,6 +77,21 @@ while [[ $# -gt 0 ]]; do
             BENCHRUN_INSPECT_WAL_RANGES=1
             SPIKE_TRIGGER_WALINSPECT_ENABLED=1
             shift ;;
+        --full-visibility)
+            BENCHRUN_FULL_VISIBILITY=1
+            BENCHRUN_INSPECT_WAL_RANGES=1
+            SPIKE_TRIGGER_TRACE_ENABLED=1
+            SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED=1
+            SPIKE_TRIGGER_PAGE_IDENTITY_ENABLED=1
+            SPIKE_TRIGGER_FREESPACE_ENABLED=1
+            SPIKE_TRIGGER_PG_STAT_STATEMENTS_ENABLED=1
+            SPIKE_TRIGGER_PG_STAT_STATEMENTS_RESET_PER_PHASE=1
+            SPIKE_TRIGGER_WALINSPECT_ENABLED=1
+            BENCHRUN_ENABLE_OS_WATCHERS=1
+            BENCHRUN_SKIP_CONTINUOUS_SAMPLING=0
+            shift ;;
+        --require-full-visibility)
+            BENCHRUN_REQUIRE_FULL_VISIBILITY=1; shift ;;
         --pg-prewarm)
             SPIKE_TRIGGER_PREWARM_ENABLED=1; shift ;;
         --pg-prewarm-mode)
@@ -198,28 +217,28 @@ YCSB_READ_SAMPLE_ARGS=()
 TRACE_START_EPOCH_SECONDS=""
 
 # Extend phase experiment parameters
-extendproportion_extend="1"
-readproportion_extend="0"
-updateproportion_extend="0"
-scanproportion_extend="0"
-insertproportion_extend="0"
-readmodifywriteproportion_extend="0"
-requestdistribution_extend="zipfian"
+extendproportion_extend="${EXTEND_EXTENDPROPORTION:-1}"
+readproportion_extend="${EXTEND_READPROPORTION:-0}"
+updateproportion_extend="${EXTEND_UPDATEPROPORTION:-0}"
+scanproportion_extend="${EXTEND_SCANPROPORTION:-0}"
+insertproportion_extend="${EXTEND_INSERTPROPORTION:-0}"
+readmodifywriteproportion_extend="${EXTEND_READMODIFYWRITEPROPORTION:-0}"
+requestdistribution_extend="${EXTEND_REQUESTDISTRIBUTION:-zipfian}"
 # Optional specific request distributions for each operation
-readrequestdistribution_extend="uniform"
-updaterequestdistribution_extend="uniform"
+readrequestdistribution_extend="${EXTEND_READREQUESTDISTRIBUTION:-uniform}"
+updaterequestdistribution_extend="${EXTEND_UPDATEREQUESTDISTRIBUTION:-uniform}"
 
 # After extend phase experiment parameters
-extendproportion_postextend="0"
-readproportion_postextend="1"
-updateproportion_postextend="0"
-scanproportion_postextend="0"
-insertproportion_postextend="0"
-readmodifywriteproportion_postextend="0"
-requestdistribution_postextend="uniform"
+extendproportion_postextend="${RUN_EXTENDPROPORTION:-0}"
+readproportion_postextend="${RUN_READPROPORTION:-1}"
+updateproportion_postextend="${RUN_UPDATEPROPORTION:-0}"
+scanproportion_postextend="${RUN_SCANPROPORTION:-0}"
+insertproportion_postextend="${RUN_INSERTPROPORTION:-0}"
+readmodifywriteproportion_postextend="${RUN_READMODIFYWRITEPROPORTION:-0}"
+requestdistribution_postextend="${RUN_REQUESTDISTRIBUTION:-uniform}"
 # Optional specific request distributions for each operation
-readrequestdistribution_postextend="uniform"
-updaterequestdistribution_postextend="uniform"
+readrequestdistribution_postextend="${RUN_READREQUESTDISTRIBUTION:-uniform}"
+updaterequestdistribution_postextend="${RUN_UPDATEREQUESTDISTRIBUTION:-uniform}"
 
 fieldlengthoriginal="${FIELD_LENGTH_ORIGINAL:-100}"
 extendoperationcount="${EXTEND_OPERATIONCOUNT:-100000}"
@@ -941,6 +960,8 @@ benchrun_init() {
         --sample-interval-seconds "$BENCHRUN_SAMPLE_INTERVAL_SECONDS" \
         --relation-size-sample-interval-seconds "$BENCHRUN_RELATION_SIZE_SAMPLE_INTERVAL_SECONDS" \
         --inspect-wal-ranges "$BENCHRUN_INSPECT_WAL_RANGES" \
+        --full-visibility-profile "$BENCHRUN_FULL_VISIBILITY" \
+        --require-full-visibility "$BENCHRUN_REQUIRE_FULL_VISIBILITY" \
         --pg-prewarm-enabled "$SPIKE_TRIGGER_PREWARM_ENABLED" \
         --pg-prewarm-mode "$SPIKE_TRIGGER_PREWARM_MODE" \
         --reset-pg-stats-before-run "$BENCHRUN_RESET_PG_STATS_BEFORE_RUN" \
@@ -1268,7 +1289,7 @@ record_pg_stat_statements() {
     local phase_label="$2"
     local epoch_label="$3"
     local event_label="$4"
-    local ts_ms statements_schema top_n query_filter rows_output psql_status had_errexit
+    local ts_ms statements_schema top_n query_filter query_filter_sql rows_output psql_status had_errexit
     local userid dbid queryid calls total_exec_time mean_exec_time max_exec_time stddev_exec_time
     local rows_count shared_blks_hit shared_blks_read shared_blks_dirtied shared_blks_written
     local blk_read_time blk_write_time temp_blks_read temp_blks_written wal_records wal_bytes query_text
@@ -1284,6 +1305,7 @@ record_pg_stat_statements() {
         top_n=25
     fi
     query_filter="$SPIKE_TRIGGER_PG_STAT_STATEMENTS_QUERY_FILTER"
+    query_filter_sql=$(sql_escape_literal "$query_filter")
     ts_ms=$(timestamp_ms)
 
     had_errexit=0
@@ -1291,7 +1313,6 @@ record_pg_stat_statements() {
         *e*) had_errexit=1; set +e ;;
     esac
     rows_output=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -X -q -t -A -F $'\t' -v ON_ERROR_STOP=1 \
-        -v query_filter="$query_filter" \
         -U "$PG_EXTENSION_USERNAME" -d "$db_name" -c "
         WITH stats AS (
             SELECT s.userid::text AS userid,
@@ -1300,7 +1321,7 @@ record_pg_stat_statements() {
                    to_jsonb(s) AS js
             FROM ${statements_schema}.pg_stat_statements s
             WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-              AND (:'query_filter' = '' OR s.query ILIKE '%' || :'query_filter' || '%')
+              AND ('$query_filter_sql' = '' OR s.query ILIKE '%' || '$query_filter_sql' || '%')
               AND s.query NOT ILIKE '%pg_stat_statements%'
         )
         SELECT userid,
@@ -1623,6 +1644,107 @@ record_wal_stats() {
             printf '\n'
         } >> "$WAL_STATS_FILE"
     done <<< "$rows_output"
+}
+
+full_visibility_psql() {
+    local db_name="$1"
+    local sql="$2"
+
+    PGPASSWORD="$PG_EXTENSION_PWD" psql -X -q -t -A -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" -c "$sql" 2>&1
+}
+
+require_full_visibility_ready() {
+    if [ "$BENCHRUN_REQUIRE_FULL_VISIBILITY" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local fail=0
+    local value statements_schema walinspect_schema server_version_num view ext
+
+    full_visibility_fail() {
+        log "Full visibility preflight failed: $1"
+        fail=1
+    }
+
+    log "Checking full visibility prerequisites in $db_name..."
+
+    if ! value=$(full_visibility_psql "$db_name" "SHOW shared_preload_libraries;"); then
+        full_visibility_fail "could not read shared_preload_libraries: $value"
+    elif ! grep -Eq '(^|,)[[:space:]]*pg_stat_statements[[:space:]]*(,|$)' <<< "$value"; then
+        full_visibility_fail "pg_stat_statements is not in shared_preload_libraries; add it and restart PostgreSQL"
+    fi
+
+    if ! value=$(full_visibility_psql "$db_name" "SHOW track_io_timing;"); then
+        full_visibility_fail "could not read track_io_timing: $value"
+    elif [ "$value" != "on" ]; then
+        full_visibility_fail "track_io_timing is '$value'; set it to on for timing visibility"
+    fi
+
+    if ! value=$(full_visibility_psql "$db_name" "SHOW log_checkpoints;"); then
+        full_visibility_fail "could not read log_checkpoints: $value"
+    elif [ "$value" != "on" ]; then
+        full_visibility_fail "log_checkpoints is '$value'; set it to on for checkpoint log-message visibility"
+    fi
+
+    for view in pg_stat_wal pg_stat_bgwriter pg_stat_activity; do
+        if ! value=$(full_visibility_psql "$db_name" "SELECT to_regclass('pg_catalog.$view') IS NOT NULL;"); then
+            full_visibility_fail "could not check $view: $value"
+        elif [ "$value" != "t" ]; then
+            full_visibility_fail "$view is unavailable"
+        fi
+    done
+
+    server_version_num=$(full_visibility_psql "$db_name" "SHOW server_version_num;" || true)
+    if [[ "$server_version_num" =~ ^[0-9]+$ ]] && [ "$server_version_num" -ge 160000 ]; then
+        if ! value=$(full_visibility_psql "$db_name" "SELECT to_regclass('pg_catalog.pg_stat_io') IS NOT NULL;"); then
+            full_visibility_fail "could not check pg_stat_io: $value"
+        elif [ "$value" != "t" ]; then
+            full_visibility_fail "pg_stat_io is unavailable on PostgreSQL $server_version_num"
+        fi
+    fi
+
+    for ext in pg_buffercache pg_freespacemap pg_stat_statements pg_walinspect; do
+        if ! value=$(full_visibility_psql "$db_name" "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = '$ext');"); then
+            full_visibility_fail "could not check extension $ext: $value"
+        elif [ "$value" != "t" ]; then
+            full_visibility_fail "extension $ext is not installed in $db_name"
+        fi
+    done
+
+    statements_schema=$(pg_stat_statements_schema "$db_name")
+    if [ -z "$statements_schema" ]; then
+        full_visibility_fail "pg_stat_statements schema is not visible in $db_name"
+    elif ! value=$(full_visibility_psql "$db_name" "SELECT count(*) FROM ${statements_schema}.pg_stat_statements;"); then
+        full_visibility_fail "pg_stat_statements is installed but not queryable: $value"
+    fi
+
+    walinspect_schema=$(pg_walinspect_schema "$db_name")
+    if [ -z "$walinspect_schema" ]; then
+        full_visibility_fail "pg_walinspect schema is not visible in $db_name"
+    elif ! value=$(full_visibility_psql "$db_name" "
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE quote_ident(n.nspname) = '$walinspect_schema'
+              AND p.proname = 'pg_get_wal_stats'
+              AND has_function_privilege(current_user, p.oid, 'execute')
+        );
+    "); then
+        full_visibility_fail "could not check pg_walinspect execute privilege: $value"
+    elif [ "$value" != "t" ]; then
+        full_visibility_fail "pg_walinspect is installed but pg_get_wal_stats is not executable by $PG_EXTENSION_USERNAME"
+    fi
+
+    if [ "$fail" -ne 0 ]; then
+        log "Full visibility run cannot start. Fix PostgreSQL prerequisites or rerun without --require-full-visibility."
+        benchrun_cleanup 2 || true
+        exit 2
+    fi
+
+    log "Full visibility prerequisites passed in $db_name."
 }
 
 list_contains_word() {
@@ -2242,6 +2364,22 @@ stop_background_pid() {
     fi
 }
 
+record_vacuum_progress_unobserved_if_empty() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local epoch_label="$1"
+    local ts_ms observed_count
+
+    [ -f "$VACUUM_PROGRESS_FILE" ] || return
+    observed_count=$(awk -F, -v ep="$epoch_label" 'NR > 1 && $2 == ep { count++ } END { print count + 0 }' "$VACUUM_PROGRESS_FILE" 2>/dev/null || echo 0)
+    if [ "$observed_count" -eq 0 ]; then
+        ts_ms=$(timestamp_ms)
+        echo "$RUN_NAME,$epoch_label,$ts_ms,unobserved,vacuum_not_observed,0,0,0,0,0,0" >> "$VACUUM_PROGRESS_FILE"
+    fi
+}
+
 wait_background_pid_with_timeout() {
     local pid="${1:-}"
     local timeout_seconds="${2:-5}"
@@ -2498,7 +2636,9 @@ find "$INTERNAL_DATA_DIR" -maxdepth 1 -type f \
     -name "*${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}*.dbstats" -delete
 
 initialize_database "$DB_NAME"
+require_full_visibility_ready "$DB_NAME"
 initialize_database "$UNCHANGE_DB_NAME"
+require_full_visibility_ready "$UNCHANGE_DB_NAME"
 benchrun_preflight "$DB_NAME"
 benchrun_maybe_reset_stats
 
@@ -3014,6 +3154,7 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
             PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -c "VACUUM (ANALYZE, VERBOSE) usertable;"
             log "VACUUM end: $(date +%s)"
             stop_background_pid "$vacuum_progress_pid"
+            record_vacuum_progress_unobserved_if_empty "$iteration"
             benchrun_finish_phase "$DB_NAME" "vacuum" "$iteration" "" "0"
             vacuum_wal_end_lsn=$(record_wal_boundary "$DB_NAME" "vacuum" "$iteration" "vacuum_end" "$vacuum_wal_start_lsn")
             record_wal_stats "$DB_NAME" "vacuum" "$iteration" "vacuum_end" "$vacuum_wal_start_lsn" "$vacuum_wal_end_lsn"

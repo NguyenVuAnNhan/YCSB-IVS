@@ -15,6 +15,158 @@ self-contained observability run directory:
 benchruns/<run_id>/
 ```
 
+## Environment Requirements
+
+The frozen full-visibility profile is intended for Linux hosts running the
+bundled YCSB-IVS tree and a local PostgreSQL instance. The EC2 runs have used
+Ubuntu with the benchmark checked out under either `/home/ycsb` or
+`/home/ubuntu`.
+
+Required command-line tools:
+
+- `bash`, `awk`, `sed`, `perl`, `sort`, `comm`, `find`, `tee`, `date`
+- Java runtime for YCSB
+- PostgreSQL client tools: `psql`, `createdb`, `dropdb`, `pg_dump`
+- Python 3 for `benchmark_observability.py`
+- `ps`, `df`, and `free` for OS/process sampling
+- `tmux` for long EC2 runs
+
+Optional but useful OS tools:
+
+- `vmstat`
+- `iostat`
+- `pidstat`
+- `journalctl`
+- AWS CLI, only if you add optional S3 sync around the run directory
+
+PostgreSQL requirements for evidence-producing full-visibility runs:
+
+- PostgreSQL 16+ is preferred because it includes `pg_stat_io`.
+- PostgreSQL 15 can run the harness, but `pg_stat_io` is unavailable and the
+  summary will mark it expected-missing.
+- PostgreSQL 17+ adds `pg_stat_checkpointer`; earlier versions use
+  `pg_stat_bgwriter` checkpoint columns where available.
+- The benchmark role must be able to drop/create the benchmark databases.
+- The extension role, usually the same as `DB_USERNAME`, must be able to create
+  or use `pg_buffercache`, `pg_freespacemap`, `pg_stat_statements`, and
+  `pg_walinspect`.
+- `pg_stat_statements` must be in `shared_preload_libraries`, which requires a
+  PostgreSQL restart.
+- `track_io_timing` must be `on`.
+- `log_checkpoints` must be `on`.
+
+Quick environment check:
+
+```bash
+export PGHOST=localhost
+export PGPASSWORD='<database-password>'
+
+psql -U ycsb -d postgres -X <<'SQL'
+select version();
+show shared_preload_libraries;
+show track_io_timing;
+show log_checkpoints;
+select name, default_version, installed_version
+from pg_available_extensions
+where name in (
+  'pg_buffercache',
+  'pg_freespacemap',
+  'pg_stat_statements',
+  'pg_walinspect',
+  'pg_prewarm'
+)
+order by name;
+SQL
+```
+
+For production/evidence runs, keep `REQUIRE_FULL_VISIBILITY=1` so the launcher
+fails early if any required visibility component is missing. Use
+`REQUIRE_FULL_VISIBILITY=0` only for local smoke tests or compatibility checks.
+
+## Frozen Full Visibility Profile
+
+For new evidence-producing runs, prefer the frozen launcher:
+
+```bash
+cd /path/to/ycsb-ec2-bundle/experiment_scripts
+DB_PWD='<database-password>' \
+RUN_ID=full_view_run3 \
+RUN=3 \
+DB_NAME=full_view \
+TYPE=full_view \
+./run_postgresql_array_json_full_visibility.sh
+```
+
+The launcher keeps the core experiment script unchanged and makes future
+experiments parameter-only. It creates a clean workload copy, enables every
+non-intervention collector, and runs the harness with:
+
+- continuous PostgreSQL/OS sampling
+- relation-size snapshots
+- `pg_buffercache` relation and page-identity capture
+- `pg_freespacemap` summaries
+- checkpoint observations and checkpoint log capture
+- `pg_stat_statements` phase reset/snapshot
+- WAL LSN markers, `pg_stat_wal`, and `pg_walinspect` phase breakdowns
+- derived phase deltas and normalized metrics
+
+`pg_prewarm` is intentionally disabled by default because it changes cache
+state. Enable it only for an intervention run:
+
+```bash
+SPIKE_TRIGGER_PREWARM_ENABLED=1 \
+SPIKE_TRIGGER_PREWARM_MODE=toast_index \
+DB_PWD='<database-password>' \
+RUN_ID=full_view_prewarm_toast_index_run1 \
+./run_postgresql_array_json_full_visibility.sh
+```
+
+Full visibility mode requires the database to be ready before the benchmark
+starts. The launcher defaults to `REQUIRE_FULL_VISIBILITY=1`, so it fails early
+instead of silently producing partial visibility. Required PostgreSQL settings:
+
+```sql
+SHOW shared_preload_libraries;
+-- Preserve any existing entries and append pg_stat_statements if it is absent.
+ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';
+ALTER SYSTEM SET track_io_timing = on;
+ALTER SYSTEM SET log_checkpoints = on;
+```
+
+Restart PostgreSQL after changing `shared_preload_libraries`; reload is enough
+for the other two settings. The benchmark role must be able to create or use:
+
+- `pg_buffercache`
+- `pg_freespacemap`
+- `pg_stat_statements`
+- `pg_walinspect`
+
+Common parameter overrides:
+
+```bash
+DB_PWD='<database-password>' \
+RUN_ID=full_view_run4 \
+RUN=4 \
+RECORDCOUNT=10000 \
+OPERATIONCOUNT=100000 \
+EXPERIMENT_EPOCHS=10 \
+EXPERIMENT_RUNS_PER_EPOCH=10 \
+EXTEND_REQUESTDISTRIBUTION=zipfian \
+RUN_REQUESTDISTRIBUTION=uniform \
+RUN_READPROPORTION=1 \
+RUN_UPDATEPROPORTION=0 \
+VACUUM_ENABLED=1 \
+./run_postgresql_array_json_full_visibility.sh
+```
+
+Useful escape hatches:
+
+```bash
+REQUIRE_FULL_VISIBILITY=0 ./run_postgresql_array_json_full_visibility.sh
+SAMPLE_INTERVAL_SECONDS=2 ./run_postgresql_array_json_full_visibility.sh
+RELATION_SIZE_SAMPLE_INTERVAL_SECONDS=10 ./run_postgresql_array_json_full_visibility.sh
+```
+
 ## Clean EC2 Full View Run
 
 This is the procedure used for the `full_view` EC2 runs:
