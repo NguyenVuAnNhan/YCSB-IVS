@@ -39,6 +39,8 @@ Existing environment variables still work. Optional additions:
   --enable-os-watchers | --disable-os-watchers
   --reset-pg-stats-before-run
   --inspect-wal-ranges
+  --pg-prewarm
+  --pg-prewarm-mode MODE
   --phase-value-sizes LIST
   --dry-run-preflight
   --skip-continuous-sampling
@@ -71,6 +73,10 @@ while [[ $# -gt 0 ]]; do
             BENCHRUN_INSPECT_WAL_RANGES=1
             SPIKE_TRIGGER_WALINSPECT_ENABLED=1
             shift ;;
+        --pg-prewarm)
+            SPIKE_TRIGGER_PREWARM_ENABLED=1; shift ;;
+        --pg-prewarm-mode)
+            SPIKE_TRIGGER_PREWARM_MODE="$2"; shift 2 ;;
         --phase-value-sizes)
             BENCHRUN_PHASE_VALUE_SIZES="$2"; shift 2 ;;
         --dry-run-preflight)
@@ -150,12 +156,12 @@ SPIKE_TRIGGER_PAGE_IDENTITY_SAMPLE_MOD=${SPIKE_TRIGGER_PAGE_IDENTITY_SAMPLE_MOD:
 SPIKE_TRIGGER_PAGE_IDENTITY_MIN_USAGECOUNT=${SPIKE_TRIGGER_PAGE_IDENTITY_MIN_USAGECOUNT:-4}
 SPIKE_TRIGGER_PAGE_IDENTITY_BASE_EVENTS="${SPIKE_TRIGGER_PAGE_IDENTITY_BASE_EVENTS:-before_run run_progress_5pct run_progress_10pct after_run}"
 SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EPOCHS="${SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EPOCHS:-45-50 56-61 68-73 81-86 94-100}"
-SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EVENTS="${SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EVENTS:-after_extend after_vacuum before_run run_progress_1pct run_progress_2pct run_progress_5pct run_progress_10pct run_progress_25pct run_progress_50pct after_run}"
+SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EVENTS="${SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EVENTS:-after_extend after_vacuum prewarm_start prewarm_end before_run run_progress_1pct run_progress_2pct run_progress_5pct run_progress_10pct run_progress_25pct run_progress_50pct after_run}"
 SPIKE_TRIGGER_FREESPACE_ENABLED=${SPIKE_TRIGGER_FREESPACE_ENABLED:-1}
 SPIKE_TRIGGER_FREESPACE_SAMPLE_MAX_PAGES=${SPIKE_TRIGGER_FREESPACE_SAMPLE_MAX_PAGES:-4096}
 SPIKE_TRIGGER_FREESPACE_BASE_EVENTS="${SPIKE_TRIGGER_FREESPACE_BASE_EVENTS:-after_extend after_vacuum before_run after_run}"
 SPIKE_TRIGGER_FREESPACE_FOCUS_EPOCHS="${SPIKE_TRIGGER_FREESPACE_FOCUS_EPOCHS:-$SPIKE_TRIGGER_PAGE_IDENTITY_FOCUS_EPOCHS}"
-SPIKE_TRIGGER_FREESPACE_FOCUS_EVENTS="${SPIKE_TRIGGER_FREESPACE_FOCUS_EVENTS:-run_progress_5pct run_progress_10pct}"
+SPIKE_TRIGGER_FREESPACE_FOCUS_EVENTS="${SPIKE_TRIGGER_FREESPACE_FOCUS_EVENTS:-prewarm_start prewarm_end run_progress_5pct run_progress_10pct}"
 SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED=${SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED:-1}
 SPIKE_TRIGGER_CHECKPOINT_LOG_TAIL_LINES=${SPIKE_TRIGGER_CHECKPOINT_LOG_TAIL_LINES:-5000}
 SPIKE_TRIGGER_PG_STAT_STATEMENTS_ENABLED=${SPIKE_TRIGGER_PG_STAT_STATEMENTS_ENABLED:-1}
@@ -165,6 +171,8 @@ SPIKE_TRIGGER_PG_STAT_STATEMENTS_QUERY_FILTER="${SPIKE_TRIGGER_PG_STAT_STATEMENT
 SPIKE_TRIGGER_WALINSPECT_ENABLED=${SPIKE_TRIGGER_WALINSPECT_ENABLED:-$BENCHRUN_INSPECT_WAL_RANGES}
 SPIKE_TRIGGER_WALINSPECT_PER_RECORD=${SPIKE_TRIGGER_WALINSPECT_PER_RECORD:-1}
 SPIKE_TRIGGER_WALINSPECT_MAX_BYTES=${SPIKE_TRIGGER_WALINSPECT_MAX_BYTES:-0}
+SPIKE_TRIGGER_PREWARM_ENABLED=${SPIKE_TRIGGER_PREWARM_ENABLED:-0}
+SPIKE_TRIGGER_PREWARM_MODE="${SPIKE_TRIGGER_PREWARM_MODE:-toast_index}"
 RUN_NAME="${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}"
 TRIGGER_DATA_DIR="${INTERNAL_DATA_DIR}/toast_spike_trigger"
 PHASE_TIMELINE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_phase_timeline.csv"
@@ -182,6 +190,7 @@ FREESPACE_SUMMARY_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_freespace_summary.csv"
 PG_STAT_STATEMENTS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_pg_stat_statements.csv"
 WAL_BOUNDS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_wal_bounds.csv"
 WAL_STATS_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_wal_stats.csv"
+PREWARM_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_pg_prewarm.csv"
 READ_SAMPLE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_read_sample.csv"
 SLOW_READ_SAMPLE_FILE="${TRIGGER_DATA_DIR}/${RUN_NAME}_slow_read_sample.csv"
 SAMPLED_DETOAST_PROBE_LOG="${TRIGGER_DATA_DIR}/${RUN_NAME}_detoast_probe_sampled_keys.log"
@@ -628,6 +637,65 @@ ensure_pg_walinspect_extension() {
     fi
 }
 
+ensure_pg_prewarm_extension() {
+    if [ "$SPIKE_TRIGGER_PREWARM_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local prewarm_schema grant_role_sql
+    grant_role_sql=$(printf "%s" "$DB_USERNAME" | sed "s/'/''/g")
+
+    if ! PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "CREATE EXTENSION IF NOT EXISTS pg_prewarm;" >/dev/null 2>&1
+    then
+        log "Warning: could not ensure pg_prewarm in $db_name. Prewarm intervention will be skipped unless pg_prewarm is already installed."
+        return
+    fi
+
+    prewarm_schema=$(PGPASSWORD="$PG_EXTENSION_PWD" psql -U "$PG_EXTENSION_USERNAME" -d "$db_name" -At -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_prewarm';
+    " 2>/dev/null || true)
+
+    if [ -z "$prewarm_schema" ]; then
+        log "Warning: pg_prewarm extension was not found in $db_name after CREATE EXTENSION."
+        return
+    fi
+
+    PGPASSWORD="$PG_EXTENSION_PWD" psql -v ON_ERROR_STOP=1 \
+        -U "$PG_EXTENSION_USERNAME" -d "$db_name" \
+        -c "
+        DO \$\$
+        DECLARE
+            r record;
+        BEGIN
+            FOR r IN
+                SELECT n.nspname AS schema_name,
+                       p.proname AS function_name,
+                       pg_get_function_identity_arguments(p.oid) AS function_args
+                FROM pg_proc p
+                JOIN pg_namespace n ON n.oid = p.pronamespace
+                JOIN pg_extension e ON e.extnamespace = n.oid
+                WHERE e.extname = 'pg_prewarm'
+                  AND p.proname IN ('pg_prewarm', 'autoprewarm_start_worker', 'autoprewarm_dump_now')
+            LOOP
+                EXECUTE format(
+                    'GRANT EXECUTE ON FUNCTION %I.%I(%s) TO %I',
+                    r.schema_name,
+                    r.function_name,
+                    r.function_args,
+                    '$grant_role_sql'
+                );
+            END LOOP;
+        END
+        \$\$;
+        " >/dev/null 2>&1 || true
+}
+
 collect_cpu_memory_metrics() {
     cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum + 0}')
     memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum + 0}')
@@ -645,6 +713,10 @@ csv_escape() {
     else
         printf '%s' "$value"
     fi
+}
+
+sql_escape_literal() {
+    printf "%s" "${1:-}" | sed "s/'/''/g"
 }
 
 utc_now() {
@@ -869,6 +941,8 @@ benchrun_init() {
         --sample-interval-seconds "$BENCHRUN_SAMPLE_INTERVAL_SECONDS" \
         --relation-size-sample-interval-seconds "$BENCHRUN_RELATION_SIZE_SAMPLE_INTERVAL_SECONDS" \
         --inspect-wal-ranges "$BENCHRUN_INSPECT_WAL_RANGES" \
+        --pg-prewarm-enabled "$SPIKE_TRIGGER_PREWARM_ENABLED" \
+        --pg-prewarm-mode "$SPIKE_TRIGGER_PREWARM_MODE" \
         --reset-pg-stats-before-run "$BENCHRUN_RESET_PG_STATS_BEFORE_RUN" \
         --skip-continuous-sampling "$BENCHRUN_SKIP_CONTINUOUS_SAMPLING" \
         --phase-value-sizes "$BENCHRUN_PHASE_VALUE_SIZES" \
@@ -906,15 +980,21 @@ benchrun_log_phase_event() {
     local exit_status="${7:-}"
     local operation_count value_size logical_bytes_per_op ycsb_copy
 
-    operation_count=$(grep -E '^operationcount=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
-    value_size=$(grep -E '^fieldlength=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
-    if [[ "$value_size" =~ ^[0-9]+$ ]]; then
-        logical_bytes_per_op=$((value_size * 10))
-    else
+    if [ "$phase_label" = "prewarm" ]; then
+        operation_count=0
+        value_size=""
         logical_bytes_per_op=""
-    fi
-    if [ -n "${LOGICAL_BYTES_PER_OP:-}" ]; then
-        logical_bytes_per_op="$LOGICAL_BYTES_PER_OP"
+    else
+        operation_count=$(grep -E '^operationcount=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
+        value_size=$(grep -E '^fieldlength=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
+        if [[ "$value_size" =~ ^[0-9]+$ ]]; then
+            logical_bytes_per_op=$((value_size * 10))
+        else
+            logical_bytes_per_op=""
+        fi
+        if [ -n "${LOGICAL_BYTES_PER_OP:-}" ]; then
+            logical_bytes_per_op="$LOGICAL_BYTES_PER_OP"
+        fi
     fi
 
     ycsb_copy=""
@@ -1028,6 +1108,9 @@ init_spike_trigger_trace() {
         echo "run_name,epoch,phase,event,timestamp_unix_ms,db_name,start_lsn,end_lsn,wal_bytes,source,resource_manager_record_type,count,count_percentage,record_size,record_size_percentage,fpi_size,fpi_size_percentage,combined_size,combined_size_percentage,message"
     } > "$WAL_STATS_FILE"
     {
+        echo "run_name,epoch,phase,event,timestamp_unix_ms,db_name,mode,relation_role,relation_name,relation_oid,relation_size_bytes,blocks_done,status,message"
+    } > "$PREWARM_FILE"
+    {
         echo "run_name,epoch,phase,timestamp_unix_ms,probe_label,ycsb_key,size_bytes"
     } > "$SAMPLED_DETOAST_PROBE_LOG"
 
@@ -1049,6 +1132,10 @@ record_phase_event() {
     iso=$(date -Iseconds)
     operation_count=$(grep -E '^operationcount=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
     field_length=$(grep -E '^fieldlength=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
+    if [ "$phase_label" = "prewarm" ]; then
+        operation_count=0
+        field_length=""
+    fi
 
     {
         csv_escape "$RUN_NAME"; printf ','
@@ -1931,6 +2018,188 @@ record_buffer_snapshot() {
     record_freespace_summary "$@"
 }
 
+pg_prewarm_schema() {
+    local db_name="$1"
+
+    PGPASSWORD="$DB_PWD" psql -X -q -t -A \
+        -U "$DB_USERNAME" -d "$db_name" -c "
+        SELECT quote_ident(n.nspname)
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'pg_prewarm';
+    " 2>/dev/null || true
+}
+
+record_prewarm_status_row() {
+    if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local epoch_label="$2"
+    local event_label="$3"
+    local mode="$4"
+    local relation_role="${5:-NULL}"
+    local relation_name="${6:-NULL}"
+    local relation_oid="${7:-NULL}"
+    local relation_size_bytes="${8:-NULL}"
+    local blocks_done="${9:-NULL}"
+    local status="${10:-unknown}"
+    local message="${11:-}"
+    local ts_ms
+
+    ts_ms=$(timestamp_ms)
+    {
+        csv_escape "$RUN_NAME"; printf ','
+        csv_escape "$epoch_label"; printf ','
+        csv_escape "prewarm"; printf ','
+        csv_escape "$event_label"; printf ','
+        printf '%s,' "$ts_ms"
+        csv_escape "$db_name"; printf ','
+        csv_escape "$mode"; printf ','
+        csv_escape "$relation_role"; printf ','
+        csv_escape "$relation_name"; printf ','
+        csv_escape "$relation_oid"; printf ','
+        csv_escape "$relation_size_bytes"; printf ','
+        csv_escape "$blocks_done"; printf ','
+        csv_escape "$status"; printf ','
+        csv_escape "$message"; printf '\n'
+    } >> "$PREWARM_FILE"
+}
+
+prewarm_target_filter() {
+    local mode="$1"
+
+    case "$mode" in
+        heap)
+            echo "relation_role = 'heap'" ;;
+        toast_index)
+            echo "relation_role = 'toast_index'" ;;
+        toast_heap|full_toast_heap)
+            echo "relation_role = 'toast_heap'" ;;
+        toast|toast_all|toast_heap_toast_index)
+            echo "relation_role IN ('toast_heap', 'toast_index')" ;;
+        heap_toast_index)
+            echo "relation_role IN ('heap', 'toast_index')" ;;
+        heap_toast|heap_toast_heap)
+            echo "relation_role IN ('heap', 'toast_heap')" ;;
+        all|heap_toast_heap_toast_index|heap_toast_toast_index)
+            echo "relation_role IN ('heap', 'toast_heap', 'toast_index')" ;;
+        *)
+            echo "" ;;
+    esac
+}
+
+run_pg_prewarm_intervention() {
+    if [ "$SPIKE_TRIGGER_PREWARM_ENABLED" != "1" ]; then
+        return
+    fi
+
+    local db_name="$1"
+    local epoch_label="$2"
+    local mode="$SPIKE_TRIGGER_PREWARM_MODE"
+    local target_filter target_table_sql prewarm_schema rows psql_status had_errexit
+    local prewarm_status relation_role relation_name relation_oid relation_size_bytes blocks_done
+
+    if [ "$db_name" != "$DB_NAME" ]; then
+        return
+    fi
+
+    target_filter=$(prewarm_target_filter "$mode")
+    if [ -z "$target_filter" ]; then
+        log "Warning: invalid SPIKE_TRIGGER_PREWARM_MODE='$mode'. Supported modes: heap, toast_index, toast_heap, toast, heap_toast_index, heap_toast, all."
+        record_prewarm_status_row "$db_name" "$epoch_label" "prewarm_skipped" "$mode" "NULL" "NULL" "NULL" "NULL" "NULL" "invalid_mode" "Unsupported prewarm mode"
+        return
+    fi
+
+    log "pg_prewarm intervention start: db=$db_name epoch=$epoch_label mode=$mode"
+    record_phase_event "prewarm" "$epoch_label" "prewarm_start" "db=$db_name mode=$mode"
+    record_checkpoint_observation "$db_name" "prewarm" "$epoch_label" "prewarm_start"
+    record_buffer_snapshot "$db_name" "prewarm" "$epoch_label" "prewarm_start"
+    benchrun_start_phase "$db_name" "prewarm" "$epoch_label"
+
+    ensure_pg_prewarm_extension "$db_name"
+    prewarm_schema=$(pg_prewarm_schema "$db_name")
+    if [ -z "$prewarm_schema" ]; then
+        record_prewarm_status_row "$db_name" "$epoch_label" "prewarm_skipped" "$mode" "NULL" "NULL" "NULL" "NULL" "NULL" "pg_prewarm_unavailable" "pg_prewarm extension is not installed or visible"
+        prewarm_status=1
+    else
+        target_table_sql=$(sql_escape_literal "$TARGET_TABLE")
+        had_errexit=0
+        case $- in
+            *e*) had_errexit=1; set +e ;;
+        esac
+        rows=$(PGPASSWORD="$DB_PWD" psql -X -q -t -A -v ON_ERROR_STOP=1 -F $'\t' \
+            -U "$DB_USERNAME" -d "$db_name" \
+            -c "
+            WITH heap AS (
+                SELECT c.oid AS heap_oid,
+                       c.relname AS heap_name,
+                       c.reltoastrelid AS toast_oid
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relname = '$target_table_sql'
+                ORDER BY n.nspname = 'public' DESC, n.nspname
+                LIMIT 1
+            ),
+            rels AS (
+                SELECT 'heap' AS relation_role, heap_oid AS rel_oid, heap_name AS relation_name
+                FROM heap
+                UNION ALL
+                SELECT 'toast_heap', t.oid, t.relname
+                FROM heap h
+                JOIN pg_class t ON t.oid = h.toast_oid
+                WHERE h.toast_oid <> 0
+                UNION ALL
+                SELECT 'toast_index', i.indexrelid, ci.relname
+                FROM heap h
+                JOIN pg_index i ON i.indrelid = h.toast_oid
+                JOIN pg_class ci ON ci.oid = i.indexrelid
+                WHERE h.toast_oid <> 0
+            )
+            SELECT relation_role,
+                   relation_name,
+                   rel_oid::oid,
+                   pg_relation_size(rel_oid),
+                   ${prewarm_schema}.pg_prewarm(rel_oid::regclass, 'buffer', 'main')
+            FROM rels
+            WHERE $target_filter
+            ORDER BY CASE relation_role
+                         WHEN 'heap' THEN 1
+                         WHEN 'toast_heap' THEN 2
+                         WHEN 'toast_index' THEN 3
+                         ELSE 4
+                     END, relation_name;
+            " 2>&1)
+        psql_status=$?
+        if [ "$had_errexit" -eq 1 ]; then
+            set -e
+        fi
+
+        if [ "$psql_status" -ne 0 ]; then
+            record_prewarm_status_row "$db_name" "$epoch_label" "prewarm_failed" "$mode" "NULL" "NULL" "NULL" "NULL" "NULL" "error" "$rows"
+            prewarm_status=1
+        elif [ -z "$rows" ]; then
+            record_prewarm_status_row "$db_name" "$epoch_label" "prewarm_skipped" "$mode" "NULL" "NULL" "NULL" "NULL" "NULL" "no_targets" "No matching relations for target table $TARGET_TABLE"
+            prewarm_status=1
+        else
+            prewarm_status=0
+            while IFS=$'\t' read -r relation_role relation_name relation_oid relation_size_bytes blocks_done; do
+                [ -z "$relation_role" ] && continue
+                record_prewarm_status_row "$db_name" "$epoch_label" "prewarm_relation" "$mode" "$relation_role" "$relation_name" "$relation_oid" "$relation_size_bytes" "$blocks_done" "ok" ""
+            done <<< "$rows"
+        fi
+    fi
+
+    benchrun_finish_phase "$db_name" "prewarm" "$epoch_label" "" "$prewarm_status"
+    record_checkpoint_observation "$db_name" "prewarm" "$epoch_label" "prewarm_end"
+    record_buffer_snapshot "$db_name" "prewarm" "$epoch_label" "prewarm_end"
+    record_phase_event "prewarm" "$epoch_label" "prewarm_end" "db=$db_name mode=$mode status=$prewarm_status"
+    record_db_stats_once "$db_name" "post-prewarm" "$epoch_label"
+    log "pg_prewarm intervention end: db=$db_name epoch=$epoch_label mode=$mode status=$prewarm_status"
+    return 0
+}
+
 start_vacuum_progress_sampler() {
     if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
         echo ""
@@ -2194,6 +2463,7 @@ initialize_database() {
     ensure_pg_freespacemap_extension "$db_name"
     ensure_pg_stat_statements_extension "$db_name"
     ensure_pg_walinspect_extension "$db_name"
+    ensure_pg_prewarm_extension "$db_name"
 
     PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -c \
         "CREATE TABLE usertable (
@@ -2755,6 +3025,8 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
             record_db_stats_once "$DB_NAME" "post-extend-no-vacuum" "$iteration"
         fi
 
+        run_pg_prewarm_intervention "$DB_NAME" "$iteration"
+
         # Setting parameter values for run phase
         log "=== Setting parameter values for run phase ==="
         perl -i -p -e "s/^extendproportion=.*/extendproportion=$extendproportion_postextend/" $WORKLOAD_FILE
@@ -2903,6 +3175,7 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
             ensure_pg_freespacemap_extension "$BACKUP_DB_NAME"
             ensure_pg_stat_statements_extension "$BACKUP_DB_NAME"
             ensure_pg_walinspect_extension "$BACKUP_DB_NAME"
+            ensure_pg_prewarm_extension "$BACKUP_DB_NAME"
             log "Backing up the database finished"
 
             run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \

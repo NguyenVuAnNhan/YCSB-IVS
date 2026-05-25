@@ -729,6 +729,8 @@ def manifest_init(args: argparse.Namespace) -> None:
             "sample_interval_seconds": args.sample_interval_seconds,
             "relation_size_sample_interval_seconds": args.relation_size_sample_interval_seconds,
             "inspect_wal_ranges": args.inspect_wal_ranges,
+            "pg_prewarm_enabled": args.pg_prewarm_enabled,
+            "pg_prewarm_mode": args.pg_prewarm_mode,
             "reset_pg_stats_before_run": args.reset_pg_stats_before_run,
             "skip_continuous_sampling": args.skip_continuous_sampling,
             "phase_value_sizes": args.phase_value_sizes,
@@ -766,6 +768,8 @@ def manifest_init(args: argparse.Namespace) -> None:
                 "VACUUM_ENABLED",
                 "EXTEND_OPERATIONCOUNT",
                 "FIELD_LENGTH_ORIGINAL",
+                "SPIKE_TRIGGER_PREWARM_ENABLED",
+                "SPIKE_TRIGGER_PREWARM_MODE",
             }
         },
     }
@@ -866,7 +870,7 @@ def preflight(args: argparse.Namespace) -> None:
         result["target_table_exists"] = False
         result["warnings"].append(f"relation mapping failed: {exc}")
 
-    for ext in ["pg_stat_statements", "pg_walinspect", "pg_buffercache", "pg_freespacemap"]:
+    for ext in ["pg_stat_statements", "pg_walinspect", "pg_buffercache", "pg_freespacemap", "pg_prewarm"]:
         try:
             installed = pg.scalar(args.db_name, f"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = {sql_literal(ext)});")
             result["optional_extensions"][ext] = installed == "t"
@@ -1475,6 +1479,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample-interval-seconds", default="5")
     p.add_argument("--relation-size-sample-interval-seconds", default="30")
     p.add_argument("--inspect-wal-ranges", default="0")
+    p.add_argument("--pg-prewarm-enabled", default="0")
+    p.add_argument("--pg-prewarm-mode", default="")
     p.add_argument("--reset-pg-stats-before-run", default="0")
     p.add_argument("--skip-continuous-sampling", default="0")
     p.add_argument("--phase-value-sizes", default="")
