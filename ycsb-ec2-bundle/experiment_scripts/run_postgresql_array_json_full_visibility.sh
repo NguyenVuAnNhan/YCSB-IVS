@@ -8,9 +8,17 @@ usage() {
     cat <<'USAGE'
 Usage:
   DB_PWD=... RUN_ID=full_view_run3 ./run_postgresql_array_json_full_visibility.sh [extra harness args]
+  DB_PWD=... ./run_postgresql_array_json_full_visibility.sh --scale light
+  DB_PWD=... ./run_postgresql_array_json_full_visibility.sh --variant text_array
 
 This is the frozen full-visibility launcher for experiment_postgresql_array_json.sh.
 Set parameters with environment variables; pass extra harness flags after them.
+
+Launcher flags:
+  --scale light|heavy             set SCALE plus matching YCSB-IVS count defaults
+  --scale-mode light|heavy        alias for --scale
+  --variant VALUE                 jsonb_array, text_array, or text_scalar
+  --value-variant VALUE           alias for --variant
 
 Common parameters:
   RUN_ID                         benchrun id; default: ${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}_full_visibility
@@ -21,6 +29,9 @@ Common parameters:
   DB_PWD or DB_PASSWORD          required
   RUN                            run counter; default: 1
   TYPE, DIST, SCALE, WORK        naming fields; defaults: full_visibility, zipfian, heavy, pure
+  VALUE_VARIANT                  default: jsonb_array
+  YCSB_BINDING                   default comes from VALUE_VARIANT
+  FIELD_SQL_TYPE                 default comes from VALUE_VARIANT
   RECORDCOUNT                    default: 10000
   OPERATIONCOUNT                 default: 100000
   EXPERIMENT_EPOCHS              default: 10
@@ -28,6 +39,15 @@ Common parameters:
   EXTEND_OPERATIONCOUNT          default: OPERATIONCOUNT
   VACUUM_ENABLED                 default: 1
   COMPARISON_INTERVAL            default: 0
+
+Scale modes used for evidence runs:
+  light                          SCALE=light, RECORDCOUNT=1000,
+                                 OPERATIONCOUNT=100000, EXTEND_OPERATIONCOUNT=10000
+  heavy                          SCALE=heavy, RECORDCOUNT=10000,
+                                 OPERATIONCOUNT=100000, EXTEND_OPERATIONCOUNT=100000
+
+The scale flag sets these count defaults. Explicit environment values for
+RECORDCOUNT, OPERATIONCOUNT, or EXTEND_OPERATIONCOUNT still override them.
 
 Phase parameters:
   EXTEND_REQUESTDISTRIBUTION     default: zipfian
@@ -52,6 +72,67 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     exit 0
 fi
 
+OPERATIONCOUNT_WAS_SET=0
+if [ -n "${OPERATIONCOUNT+x}" ]; then
+    OPERATIONCOUNT_WAS_SET=1
+fi
+
+SCALE_MODE="${SCALE:-heavy}"
+VALUE_VARIANT_MODE="${VALUE_VARIANT:-jsonb_array}"
+EXTRA_HARNESS_ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --scale|--scale-mode)
+            if [ "$#" -lt 2 ]; then
+                echo "Missing value for $1; expected light or heavy." >&2
+                exit 2
+            fi
+            SCALE_MODE="$2"
+            shift 2
+            ;;
+        --scale=*|--scale-mode=*)
+            SCALE_MODE="${1#*=}"
+            shift
+            ;;
+        --variant|--value-variant)
+            if [ "$#" -lt 2 ]; then
+                echo "Missing value for $1; expected jsonb_array, text_array, or text_scalar." >&2
+                exit 2
+            fi
+            VALUE_VARIANT_MODE="$2"
+            shift 2
+            ;;
+        --variant=*|--value-variant=*)
+            VALUE_VARIANT_MODE="${1#*=}"
+            shift
+            ;;
+        *)
+            EXTRA_HARNESS_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+case "$SCALE_MODE" in
+    light|heavy) ;;
+    *)
+        echo "Invalid scale mode '$SCALE_MODE'; expected light or heavy." >&2
+        exit 2
+        ;;
+esac
+
+case "$VALUE_VARIANT_MODE" in
+    jsonb_array|text_array|text_scalar) ;;
+    *)
+        echo "Invalid value variant '$VALUE_VARIANT_MODE'; expected jsonb_array, text_array, or text_scalar." >&2
+        exit 2
+        ;;
+esac
+
 if [ -n "${DB_PASSWORD:-}" ] && [ -z "${DB_PWD:-}" ]; then
     export DB_PWD="$DB_PASSWORD"
 fi
@@ -62,11 +143,20 @@ export DB_USERNAME="${DB_USERNAME:-ycsb}"
 export PG_EXTENSION_USERNAME="${PG_EXTENSION_USERNAME:-$DB_USERNAME}"
 export PG_EXTENSION_PWD="${PG_EXTENSION_PWD:-$DB_PWD}"
 
-export TYPE="${TYPE:-full_visibility}"
+if [ -z "${TYPE+x}" ]; then
+    case "$VALUE_VARIANT_MODE" in
+        jsonb_array) export TYPE="full_visibility" ;;
+        text_array) export TYPE="full_visibility_text_array" ;;
+        text_scalar) export TYPE="full_visibility_text_scalar" ;;
+    esac
+else
+    export TYPE
+fi
 export DIST="${DIST:-zipfian}"
-export SCALE="${SCALE:-heavy}"
+export SCALE="$SCALE_MODE"
 export WORK="${WORK:-pure}"
 export RUN="${RUN:-1}"
+export VALUE_VARIANT="$VALUE_VARIANT_MODE"
 export RUN_ID="${RUN_ID:-${TYPE}_run${RUN}_${DIST}_${SCALE}_${WORK}_full_visibility}"
 
 export DB_NAME="${DB_NAME:-full_visibility}"
@@ -76,11 +166,32 @@ export DB_URL="${DB_URL:-jdbc:postgresql://localhost:5432/$DB_NAME}"
 export UNCHANGE_DB_URL="${UNCHANGE_DB_URL:-jdbc:postgresql://localhost:5432/$UNCHANGE_DB_NAME}"
 export BACKUP_URL="${BACKUP_URL:-jdbc:postgresql://localhost:5432/$BACKUP_DB_NAME}"
 
-export RECORDCOUNT="${RECORDCOUNT:-10000}"
-export OPERATIONCOUNT="${OPERATIONCOUNT:-100000}"
+case "$SCALE" in
+    light)
+        scale_recordcount=1000
+        scale_operationcount=100000
+        scale_extend_operationcount=10000
+        ;;
+    heavy)
+        scale_recordcount=10000
+        scale_operationcount=100000
+        scale_extend_operationcount=100000
+        ;;
+esac
+
+export RECORDCOUNT="${RECORDCOUNT:-$scale_recordcount}"
+export OPERATIONCOUNT="${OPERATIONCOUNT:-$scale_operationcount}"
 export EXPERIMENT_EPOCHS="${EXPERIMENT_EPOCHS:-10}"
 export EXPERIMENT_RUNS_PER_EPOCH="${EXPERIMENT_RUNS_PER_EPOCH:-10}"
-export EXTEND_OPERATIONCOUNT="${EXTEND_OPERATIONCOUNT:-$OPERATIONCOUNT}"
+if [ -z "${EXTEND_OPERATIONCOUNT+x}" ]; then
+    if [ "$OPERATIONCOUNT_WAS_SET" = "1" ]; then
+        export EXTEND_OPERATIONCOUNT="$OPERATIONCOUNT"
+    else
+        export EXTEND_OPERATIONCOUNT="$scale_extend_operationcount"
+    fi
+else
+    export EXTEND_OPERATIONCOUNT
+fi
 export VACUUM_ENABLED="${VACUUM_ENABLED:-1}"
 export COMPARISON_INTERVAL="${COMPARISON_INTERVAL:-0}"
 
@@ -157,6 +268,7 @@ RELATION_SIZE_SAMPLE_INTERVAL_SECONDS="${RELATION_SIZE_SAMPLE_INTERVAL_SECONDS:-
 
 HARNESS_ARGS=(
     --run-id "$RUN_ID" \
+    --variant "$VALUE_VARIANT" \
     --sample-interval-seconds "$SAMPLE_INTERVAL_SECONDS" \
     --relation-size-sample-interval-seconds "$RELATION_SIZE_SAMPLE_INTERVAL_SECONDS" \
     --full-visibility
@@ -165,4 +277,4 @@ if [ "$BENCHRUN_REQUIRE_FULL_VISIBILITY" = "1" ]; then
     HARNESS_ARGS+=(--require-full-visibility)
 fi
 
-exec ./experiment_postgresql_array_json.sh "${HARNESS_ARGS[@]}" "$@"
+exec ./experiment_postgresql_array_json.sh "${HARNESS_ARGS[@]}" "${EXTRA_HARNESS_ARGS[@]}"

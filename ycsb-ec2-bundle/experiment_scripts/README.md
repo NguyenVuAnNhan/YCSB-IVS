@@ -147,8 +147,15 @@ Common parameter overrides:
 DB_PWD='<database-password>' \
 RUN_ID=full_view_run4 \
 RUN=4 \
-RECORDCOUNT=10000 \
-OPERATIONCOUNT=100000 \
+./run_postgresql_array_json_full_visibility.sh --scale heavy
+```
+
+For the standard full-view read-after-extend workload:
+
+```bash
+DB_PWD='<database-password>' \
+RUN_ID=full_view_run4 \
+RUN=4 \
 EXPERIMENT_EPOCHS=10 \
 EXPERIMENT_RUNS_PER_EPOCH=10 \
 EXTEND_REQUESTDISTRIBUTION=zipfian \
@@ -156,7 +163,7 @@ RUN_REQUESTDISTRIBUTION=uniform \
 RUN_READPROPORTION=1 \
 RUN_UPDATEPROPORTION=0 \
 VACUUM_ENABLED=1 \
-./run_postgresql_array_json_full_visibility.sh
+./run_postgresql_array_json_full_visibility.sh --scale heavy
 ```
 
 Useful escape hatches:
@@ -165,6 +172,93 @@ Useful escape hatches:
 REQUIRE_FULL_VISIBILITY=0 ./run_postgresql_array_json_full_visibility.sh
 SAMPLE_INTERVAL_SECONDS=2 ./run_postgresql_array_json_full_visibility.sh
 RELATION_SIZE_SAMPLE_INTERVAL_SECONDS=10 ./run_postgresql_array_json_full_visibility.sh
+```
+
+## Scale Modes
+
+Use only these two scale modes for evidence-producing experiments. They match
+the YCSB-IVS paper's lightweight/heavyweight design and keep comparisons
+interpretable across runs.
+
+| Mode | `SCALE` | `RECORDCOUNT` | `OPERATIONCOUNT` | `EXTEND_OPERATIONCOUNT` | Initial field length | Default epochs |
+|---|---|---:|---:|---:|---:|---:|
+| Lightweight | `light` | 1,000 | 100,000 | 10,000 | 100 bytes | 10 x 10 |
+| Heavyweight | `heavy` | 10,000 | 100,000 | 100,000 | 100 bytes | 10 x 10 |
+
+Both modes start with 10 fields of 100 bytes each, so the logical initial
+record size is about 1 KB. Each `EXTEND` operation appends 100 bytes to one
+field. With 100 total extend/run iterations, the lightweight mode grows from
+about 1 MB to about 100 MB logical data, while heavyweight grows from about
+10 MB to about 1 GB.
+
+Use the launcher flag instead of setting the count variables by hand:
+
+```bash
+./run_postgresql_array_json_full_visibility.sh --scale light
+./run_postgresql_array_json_full_visibility.sh --scale heavy
+```
+
+`--scale-mode` is accepted as an alias for `--scale`. The flag sets `SCALE`
+plus the matching count defaults. Explicit environment values for
+`RECORDCOUNT`, `OPERATIONCOUNT`, or `EXTEND_OPERATIONCOUNT` still override the
+scale defaults when a custom run is needed.
+
+## Value Variants
+
+The full-visibility launcher now supports the same experiment shape for the
+three value representations we compare:
+
+| Variant | YCSB binding | PostgreSQL field type | Default `TYPE` |
+|---|---|---|---|
+| `jsonb_array` | `jdbc-array-json` | `JSONB` | `full_visibility` |
+| `text_array` | `jdbc-array` | `TEXT[]` | `full_visibility_text_array` |
+| `text_scalar` | `jdbc` | `TEXT` | `full_visibility_text_scalar` |
+
+`jsonb_array` is the default, so existing commands keep their behavior. Use
+`--variant` or `VALUE_VARIANT` to run the TEXT visibility controls:
+
+```bash
+DB_PWD='<database-password>' \
+RUN_ID=text_array_heavy_run1 \
+RUN=1 \
+DB_NAME=text_array_full_view \
+./run_postgresql_array_json_full_visibility.sh --scale heavy --variant text_array
+
+DB_PWD='<database-password>' \
+RUN_ID=text_scalar_heavy_run1 \
+RUN=1 \
+DB_NAME=text_scalar_full_view \
+./run_postgresql_array_json_full_visibility.sh --scale heavy --variant text_scalar
+```
+
+The run manifest records `value_variant`, `ycsb_binding`, and `field_sql_type`.
+The key-size histogram and value-size CSVs use variant-specific SQL so `JSONB`,
+`TEXT[]`, and `TEXT` all report logical value bytes on the same scale.
+
+Lightweight full-visibility run:
+
+```bash
+DB_PWD='<database-password>' \
+RUN_ID=full_view_light_run1 \
+RUN=1 \
+DB_NAME=full_view \
+TYPE=full_view \
+EXPERIMENT_EPOCHS=10 \
+EXPERIMENT_RUNS_PER_EPOCH=10 \
+./run_postgresql_array_json_full_visibility.sh --scale light
+```
+
+Heavyweight full-visibility run:
+
+```bash
+DB_PWD='<database-password>' \
+RUN_ID=full_view_heavy_run1 \
+RUN=1 \
+DB_NAME=full_view \
+TYPE=full_view \
+EXPERIMENT_EPOCHS=10 \
+EXPERIMENT_RUNS_PER_EPOCH=10 \
+./run_postgresql_array_json_full_visibility.sh --scale heavy
 ```
 
 ## Clean EC2 Full View Run
@@ -178,6 +272,10 @@ This is the procedure used for the `full_view` EC2 runs:
 - zipfian extend, uniform read
 - pure read workload after extend
 - tmux session named `ycsb`
+
+This is the heavyweight scale mode. For lightweight, use 1,000 starting records
+and 10,000 extend operations per phase, while keeping 100,000 run operations
+per phase.
 
 Use a fresh run id for each run, for example `full_view_run1`,
 `full_view_run2`, and so on. The run counter is the `RUN` environment variable.

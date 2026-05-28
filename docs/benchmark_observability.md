@@ -143,3 +143,49 @@ available on the PostgreSQL version, the collector logs that in
 `--inspect-wal-ranges` can be useful when checking whether checkpoint/full-page
 image behavior aligns with a latency jump, but it is disabled by default because
 WAL inspection can scan large ranges.
+
+## Experiment Scale Modes
+
+Evidence-producing runs should use one of the two YCSB-IVS scale modes:
+
+| Mode | `SCALE` | `RECORDCOUNT` | `OPERATIONCOUNT` | `EXTEND_OPERATIONCOUNT` | Initial field length | Default epochs |
+|---|---|---:|---:|---:|---:|---:|
+| Lightweight | `light` | 1,000 | 100,000 | 10,000 | 100 bytes | 10 x 10 |
+| Heavyweight | `heavy` | 10,000 | 100,000 | 100,000 | 100 bytes | 10 x 10 |
+
+Use the full-visibility launcher scale flag:
+
+```bash
+./run_postgresql_array_json_full_visibility.sh --scale light
+./run_postgresql_array_json_full_visibility.sh --scale heavy
+```
+
+`--scale-mode` is accepted as an alias. The flag sets `SCALE` plus matching
+record and operation count defaults. Explicit environment values for
+`RECORDCOUNT`, `OPERATIONCOUNT`, or `EXTEND_OPERATIONCOUNT` still override the
+scale defaults for custom runs.
+
+## Value Variants
+
+The full-visibility harness can run the same workload and observability path
+against three PostgreSQL value representations:
+
+| Variant | YCSB binding | PostgreSQL field type | Notes |
+|---|---|---|---|
+| `jsonb_array` | `jdbc-array-json` | `JSONB` | Default full-view configuration. |
+| `text_array` | `jdbc-array` | `TEXT[]` | Uses PostgreSQL array append for `EXTEND`. |
+| `text_scalar` | `jdbc` | `TEXT` | Uses scalar string append for `EXTEND`. |
+
+Use `--variant` on the launcher:
+
+```bash
+./run_postgresql_array_json_full_visibility.sh --scale heavy --variant jsonb_array
+./run_postgresql_array_json_full_visibility.sh --scale heavy --variant text_array
+./run_postgresql_array_json_full_visibility.sh --scale heavy --variant text_scalar
+```
+
+The default remains `jsonb_array`. Non-default variants receive distinct default
+`TYPE` values (`full_visibility_text_array` and
+`full_visibility_text_scalar`) unless `TYPE` is set explicitly. The manifest and
+`config_resolved.json` record `VALUE_VARIANT`, `YCSB_BINDING`, and
+`FIELD_SQL_TYPE`.

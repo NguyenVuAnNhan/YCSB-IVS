@@ -726,6 +726,9 @@ def manifest_init(args: argparse.Namespace) -> None:
             "scale": args.scale,
             "work": args.work,
             "run_number": args.run_number,
+            "value_variant": args.value_variant,
+            "ycsb_binding": args.ycsb_binding,
+            "field_sql_type": args.field_sql_type,
             "sample_interval_seconds": args.sample_interval_seconds,
             "relation_size_sample_interval_seconds": args.relation_size_sample_interval_seconds,
             "inspect_wal_ranges": args.inspect_wal_ranges,
@@ -764,6 +767,9 @@ def manifest_init(args: argparse.Namespace) -> None:
                 "SCALE",
                 "WORK",
                 "RUN",
+                "VALUE_VARIANT",
+                "YCSB_BINDING",
+                "FIELD_SQL_TYPE",
                 "EXPERIMENT_EPOCHS",
                 "EXPERIMENT_RUNS_PER_EPOCH",
                 "COMPARISON_INTERVAL",
@@ -1577,6 +1583,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scale", default="")
     p.add_argument("--work", default="")
     p.add_argument("--run-number", default="")
+    p.add_argument("--value-variant", default="")
+    p.add_argument("--ycsb-binding", default="")
+    p.add_argument("--field-sql-type", default="")
     p.add_argument("--sample-interval-seconds", default="5")
     p.add_argument("--relation-size-sample-interval-seconds", default="30")
     p.add_argument("--inspect-wal-ranges", default="0")

@@ -24,6 +24,7 @@ BENCHRUN_DRY_RUN_PREFLIGHT="${BENCHRUN_DRY_RUN_PREFLIGHT:-0}"
 BENCHRUN_SKIP_CONTINUOUS_SAMPLING="${BENCHRUN_SKIP_CONTINUOUS_SAMPLING:-0}"
 BENCHRUN_SKIP_DERIVED_ANALYSIS="${BENCHRUN_SKIP_DERIVED_ANALYSIS:-0}"
 BENCHRUN_PHASE_VALUE_SIZES="${BENCHRUN_PHASE_VALUE_SIZES:-}"
+VALUE_VARIANT="${VALUE_VARIANT:-jsonb_array}"
 CLI_DB_URL=""
 ORIGINAL_COMMAND_LINE="$0 $*"
 
@@ -45,6 +46,8 @@ Existing environment variables still work. Optional additions:
   --require-full-visibility
   --pg-prewarm
   --pg-prewarm-mode MODE
+  --variant jsonb_array|text_array|text_scalar
+  --value-variant jsonb_array|text_array|text_scalar
   --phase-value-sizes LIST
   --dry-run-preflight
   --skip-continuous-sampling
@@ -96,6 +99,10 @@ while [[ $# -gt 0 ]]; do
             SPIKE_TRIGGER_PREWARM_ENABLED=1; shift ;;
         --pg-prewarm-mode)
             SPIKE_TRIGGER_PREWARM_MODE="$2"; shift 2 ;;
+        --variant|--value-variant)
+            VALUE_VARIANT="$2"; shift 2 ;;
+        --variant=*|--value-variant=*)
+            VALUE_VARIANT="${1#*=}"; shift ;;
         --phase-value-sizes)
             BENCHRUN_PHASE_VALUE_SIZES="$2"; shift 2 ;;
         --dry-run-preflight)
@@ -136,6 +143,28 @@ DIST="${DIST:-zipfian}" # "uniform" OR "zipfian"
 SCALE="${SCALE:-heavy}" # "heavy" OR "light"
 WORK="${WORK:-pure}" # "mixed" OR "pure"
 RUN="${RUN:-1}"
+
+case "$VALUE_VARIANT" in
+    jsonb_array)
+        YCSB_BINDING="${YCSB_BINDING:-jdbc-array-json}"
+        FIELD_SQL_TYPE="${FIELD_SQL_TYPE:-JSONB}"
+        VALUE_VARIANT_LABEL="JSONB array"
+        ;;
+    text_array)
+        YCSB_BINDING="${YCSB_BINDING:-jdbc-array}"
+        FIELD_SQL_TYPE="${FIELD_SQL_TYPE:-TEXT[]}"
+        VALUE_VARIANT_LABEL="TEXT array"
+        ;;
+    text_scalar)
+        YCSB_BINDING="${YCSB_BINDING:-jdbc}"
+        FIELD_SQL_TYPE="${FIELD_SQL_TYPE:-TEXT}"
+        VALUE_VARIANT_LABEL="TEXT scalar"
+        ;;
+    *)
+        echo "Invalid VALUE_VARIANT '$VALUE_VARIANT'; expected jsonb_array, text_array, or text_scalar." >&2
+        exit 2
+        ;;
+esac
 
 # Define the workload file and the log file
 WORKLOAD_FILE="${WORKLOAD_FILE:-../workloads/workloada-extend}"
@@ -246,6 +275,104 @@ extendoperationcount="${EXTEND_OPERATIONCOUNT:-100000}"
 # Function to log and print messages
 log() {
     echo "$1" | tee -a $LOG_FILE
+}
+
+value_field_definitions_sql() {
+    local definitions=""
+    local i
+    for i in $(seq 0 9); do
+        if [ -z "$definitions" ]; then
+            definitions="field${i} ${FIELD_SQL_TYPE}"
+        else
+            definitions="$definitions, field${i} ${FIELD_SQL_TYPE}"
+        fi
+    done
+    printf '%s' "$definitions"
+}
+
+field_logical_size_expr() {
+    local field_name="$1"
+
+    case "$VALUE_VARIANT" in
+        jsonb_array)
+            printf "COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(%s, '[]'::jsonb)) AS elem(value)), 0)" "$field_name"
+            ;;
+        text_array)
+            printf "COALESCE((SELECT SUM(octet_length(value)) FROM unnest(COALESCE(%s, ARRAY[]::text[])) AS elem(value)), 0)" "$field_name"
+            ;;
+        text_scalar)
+            printf "COALESCE(octet_length(%s), 0)" "$field_name"
+            ;;
+    esac
+}
+
+logical_record_size_expr() {
+    local expr=""
+    local part
+    local i
+
+    for i in $(seq 0 9); do
+        part=$(field_logical_size_expr "field${i}")
+        if [ -z "$expr" ]; then
+            expr="$part"
+        else
+            expr="$expr + $part"
+        fi
+    done
+    printf '%s' "$expr"
+}
+
+logical_key_size_query() {
+    printf 'SELECT ycsb_key, %s AS size FROM usertable;' "$(logical_record_size_expr)"
+}
+
+logical_total_size_query() {
+    printf 'SELECT COALESCE(SUM(%s), 0) FROM usertable;' "$(logical_record_size_expr)"
+}
+
+logical_total_size() {
+    local db_name="$1"
+    PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -At -F"," \
+        -c "$(logical_total_size_query)"
+}
+
+write_logical_key_sizes() {
+    local db_name="$1"
+    local output_file="$2"
+
+    echo "ycsb_key,size" > "$output_file"
+    PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -At -F"," \
+        -c "$(logical_key_size_query)" >> "$output_file"
+}
+
+value_element_count_expr() {
+    local expr=""
+    local part
+    local i
+
+    case "$VALUE_VARIANT" in
+        jsonb_array)
+            for i in $(seq 0 9); do
+                part="jsonb_array_length(COALESCE(field${i}, '[]'::jsonb))"
+                if [ -z "$expr" ]; then
+                    expr="$part"
+                else
+                    expr="$expr + $part"
+                fi
+            done
+            ;;
+        text_array)
+            for i in $(seq 0 9); do
+                part="COALESCE(cardinality(field${i}), 0)"
+                if [ -z "$expr" ]; then
+                    expr="$part"
+                else
+                    expr="$expr + $part"
+                fi
+            done
+            ;;
+    esac
+    printf '%s' "$expr"
 }
 
 postgres_setting_row() {
@@ -400,7 +527,7 @@ record_checkpoint_log_message_row() {
 
 collect_checkpoint_log_messages() {
     if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ] || [ "$SPIKE_TRIGGER_CHECKPOINT_LOGS_ENABLED" != "1" ]; then
-        return
+        return 0
     fi
 
     local phase_label="$1"
@@ -448,6 +575,8 @@ collect_checkpoint_log_messages() {
     if [ "$saw_source" -eq 0 ] && [ "$saw_message" -eq 0 ]; then
         record_checkpoint_log_message_row "$phase_label" "$epoch_label" "$event_label" "checkpoint_log_unavailable" "No readable PostgreSQL log file or journal checkpoint message found; see checkpoint_log_settings for server log configuration." >/dev/null || true
     fi
+
+    return 0
 }
 
 ensure_checkpoint_logging() {
@@ -957,6 +1086,9 @@ benchrun_init() {
         --scale "$SCALE" \
         --work "$WORK" \
         --run-number "$RUN" \
+        --value-variant "$VALUE_VARIANT" \
+        --ycsb-binding "$YCSB_BINDING" \
+        --field-sql-type "$FIELD_SQL_TYPE" \
         --sample-interval-seconds "$BENCHRUN_SAMPLE_INTERVAL_SECONDS" \
         --relation-size-sample-interval-seconds "$BENCHRUN_RELATION_SIZE_SAMPLE_INTERVAL_SECONDS" \
         --inspect-wal-ranges "$BENCHRUN_INSPECT_WAL_RANGES" \
@@ -1006,8 +1138,18 @@ benchrun_log_phase_event() {
         value_size=""
         logical_bytes_per_op=""
     else
-        operation_count=$(grep -E '^operationcount=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
-        value_size=$(grep -E '^fieldlength=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
+        operation_count=$(awk -F= '/^operationcount=/{ value=$2 } END { print value }' "$WORKLOAD_FILE" 2>/dev/null || true)
+        value_size=$(awk -F= '
+            /^fieldlength=/{ field_length=$2 }
+            /^extendfieldlength=/{ extend_field_length=$2 }
+            END {
+                if (field_length != "") {
+                    print field_length
+                } else {
+                    print extend_field_length
+                }
+            }
+        ' "$WORKLOAD_FILE" 2>/dev/null || true)
         if [[ "$value_size" =~ ^[0-9]+$ ]]; then
             logical_bytes_per_op=$((value_size * 10))
         else
@@ -1140,7 +1282,7 @@ init_spike_trigger_trace() {
 
 record_phase_event() {
     if [ "$SPIKE_TRIGGER_TRACE_ENABLED" != "1" ]; then
-        return
+        return 0
     fi
 
     local phase_label="$1"
@@ -1151,8 +1293,18 @@ record_phase_event() {
 
     ts_ms=$(timestamp_ms)
     iso=$(date -Iseconds)
-    operation_count=$(grep -E '^operationcount=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
-    field_length=$(grep -E '^fieldlength=' "$WORKLOAD_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2)
+    operation_count=$(awk -F= '/^operationcount=/{ value=$2 } END { print value }' "$WORKLOAD_FILE" 2>/dev/null || true)
+    field_length=$(awk -F= '
+        /^fieldlength=/{ field_length=$2 }
+        /^extendfieldlength=/{ extend_field_length=$2 }
+        END {
+            if (field_length != "") {
+                print field_length
+            } else {
+                print extend_field_length
+            }
+        }
+    ' "$WORKLOAD_FILE" 2>/dev/null || true)
     if [ "$phase_label" = "prewarm" ]; then
         operation_count=0
         field_length=""
@@ -1168,6 +1320,8 @@ record_phase_event() {
         csv_escape "$field_length"; printf ','
         csv_escape "$notes"; printf '\n'
     } >> "$PHASE_TIMELINE_FILE"
+
+    return 0
 }
 
 record_checkpoint_observation() {
@@ -2593,6 +2747,7 @@ record_db_stats_once() {
 # Initialize PostgreSQL database
 initialize_database() {
     local db_name="$1"
+    local field_definitions
     log "Initializing PostgreSQL database $db_name..."
 
     PGPASSWORD="$DB_PWD" dropdb --if-exists "$db_name" -U "$DB_USERNAME"
@@ -2603,11 +2758,11 @@ initialize_database() {
     ensure_pg_walinspect_extension "$db_name"
     ensure_pg_prewarm_extension "$db_name"
 
+    field_definitions=$(value_field_definitions_sql)
     PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" -c \
         "CREATE TABLE usertable (
             ycsb_key TEXT PRIMARY KEY,
-            field0 JSONB, field1 JSONB, field2 JSONB, field3 JSONB, field4 JSONB,
-            field5 JSONB, field6 JSONB, field7 JSONB, field8 JSONB, field9 JSONB
+            $field_definitions
         );"
 
     log "Done initializing $db_name."
@@ -2629,6 +2784,7 @@ mkdir -p "$INTERNAL_DATA_DIR"
 > "$DETOAST_PROBE_LOG"
 init_spike_trigger_trace
 ensure_checkpoint_logging
+log "Value variant: $VALUE_VARIANT_LABEL (VALUE_VARIANT=$VALUE_VARIANT, YCSB_BINDING=$YCSB_BINDING, FIELD_SQL_TYPE=$FIELD_SQL_TYPE)"
 
 rm -rf $KEY_SIZE_LOG
 rm -f "$KEY_SIZE_FILE_AFTER_EXTEND" "$KEY_SIZE_FILE_AFTER_RUN"
@@ -2896,6 +3052,8 @@ run_jsonb_detoast_probes() {
     local phase_label="$2"
     local epoch_label="$3"
     local key_size_log="$4"
+    local logical_size_expr
+    local element_count_expr
 
     if [ "$DETOAST_PROBE_ENABLED" != "1" ]; then
         return
@@ -2911,7 +3069,9 @@ run_jsonb_detoast_probes() {
     fi
 
     mkdir -p "$INTERNAL_DATA_DIR"
-    log "Running JSONB detoast probes for $db_name phase=$phase_label epoch=$epoch_label"
+    logical_size_expr=$(logical_record_size_expr)
+    element_count_expr=$(value_element_count_expr)
+    log "Running detoast probes for $VALUE_VARIANT_LABEL on $db_name phase=$phase_label epoch=$epoch_label"
 
     while IFS=, read -r probe_label probe_key probe_size; do
         if [ "$SPIKE_TRIGGER_TRACE_ENABLED" = "1" ]; then
@@ -2940,40 +3100,24 @@ run_jsonb_detoast_probes() {
                     -v ON_ERROR_STOP=1 \
                     -v probe_key="$probe_key"
             echo
-            echo "JSONB array-length detoast probe"
+            if [ -n "$element_count_expr" ]; then
+                echo "$VALUE_VARIANT_LABEL element-count detoast probe"
+                printf '%s\n' \
+                    "EXPLAIN (ANALYZE, BUFFERS)" \
+                    "SELECT" \
+                    "    $element_count_expr AS value_element_count" \
+                    "FROM usertable" \
+                    "WHERE ycsb_key = :'probe_key';" \
+                    | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
+                        -v ON_ERROR_STOP=1 \
+                        -v probe_key="$probe_key"
+                echo
+            fi
+            echo "Detoast and logical byte probe"
             printf '%s\n' \
                 "EXPLAIN (ANALYZE, BUFFERS)" \
                 "SELECT" \
-                "    jsonb_array_length(COALESCE(field0, '[]'::jsonb)) +" \
-                "    jsonb_array_length(COALESCE(field1, '[]'::jsonb)) +" \
-                "    jsonb_array_length(COALESCE(field2, '[]'::jsonb)) +" \
-                "    jsonb_array_length(COALESCE(field3, '[]'::jsonb)) +" \
-                "    jsonb_array_length(COALESCE(field4, '[]'::jsonb)) +" \
-                "    jsonb_array_length(COALESCE(field5, '[]'::jsonb)) +" \
-                "    jsonb_array_length(COALESCE(field6, '[]'::jsonb)) +" \
-                "    jsonb_array_length(COALESCE(field7, '[]'::jsonb)) +" \
-                "    jsonb_array_length(COALESCE(field8, '[]'::jsonb)) +" \
-                "    jsonb_array_length(COALESCE(field9, '[]'::jsonb)) AS jsonb_array_element_count" \
-                "FROM usertable" \
-                "WHERE ycsb_key = :'probe_key';" \
-                | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
-                    -v ON_ERROR_STOP=1 \
-                    -v probe_key="$probe_key"
-            echo
-            echo "Detoast and JSONB serialization probe"
-            printf '%s\n' \
-                "EXPLAIN (ANALYZE, BUFFERS)" \
-                "SELECT" \
-                "    octet_length(field0::text) +" \
-                "    octet_length(field1::text) +" \
-                "    octet_length(field2::text) +" \
-                "    octet_length(field3::text) +" \
-                "    octet_length(field4::text) +" \
-                "    octet_length(field5::text) +" \
-                "    octet_length(field6::text) +" \
-                "    octet_length(field7::text) +" \
-                "    octet_length(field8::text) +" \
-                "    octet_length(field9::text) AS logical_json_text_bytes" \
+                "    $logical_size_expr AS logical_value_bytes" \
                 "FROM usertable" \
                 "WHERE ycsb_key = :'probe_key';" \
                 | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db_name" \
@@ -3003,29 +3147,29 @@ insertproportion=${insertproportion:-""}
 extendproportion=${extendproportion:-""}
 
 run_with_metrics "$DB_NAME" "$phase" "$run" "$OUTPUT_CSV" \
-    $YCSB load jdbc-array-json -s \
-    -P $WORKLOAD_FILE \
-    -P $JDBC_PROPERTIES \
+    "$YCSB" load "$YCSB_BINDING" -s \
+    -P "$WORKLOAD_FILE" \
+    -P "$JDBC_PROPERTIES" \
     -p db.url="$DB_URL" \
     -p db.user="$DB_USERNAME" \
     -p db.passwd="$DB_PWD"
 cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum}')
 memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum}')
-total_size_initial_load=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," -c "SELECT SUM(COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0)) FROM usertable;")
+total_size_initial_load=$(logical_total_size "$DB_NAME")
 log "Initial-load verification - TotalSize:$total_size_initial_load ExpectedFieldLength:$fieldlengthoriginal"
 collect_postgres_metrics $DB_NAME
 write_result "TRUE"
 
 # Load unchange value size (reference) DB
 run_with_metrics "$UNCHANGE_DB_NAME" "$phase" "$run" "$OUTPUT_CSV" \
-    $YCSB load jdbc-array-json -s \
-    -P $WORKLOAD_FILE \
-    -P $JDBC_PROPERTIES \
+    "$YCSB" load "$YCSB_BINDING" -s \
+    -P "$WORKLOAD_FILE" \
+    -P "$JDBC_PROPERTIES" \
     -p db.url="$UNCHANGE_DB_URL" \
     -p db.user="$DB_USERNAME" \
     -p db.passwd="$DB_PWD"
 
-total_size_reference_load=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME" -At -F"," -c "SELECT SUM(COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0)) FROM usertable;")
+total_size_reference_load=$(logical_total_size "$UNCHANGE_DB_NAME")
 log "Reference-load verification - TotalSize:$total_size_reference_load ExpectedFieldLength:$fieldlengthoriginal"
 
 # Save original operationcount before modifying it
@@ -3067,9 +3211,9 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
         phase="extend"
         # Capture both stdout and stderr to capture status messages
         run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
-            $YCSB run jdbc-array-json -s \
-            -P $WORKLOAD_FILE \
-            -P $JDBC_PROPERTIES \
+            "$YCSB" run "$YCSB_BINDING" -s \
+            -P "$WORKLOAD_FILE" \
+            -P "$JDBC_PROPERTIES" \
             -p db.url="$DB_URL" \
             -p db.user="$DB_USERNAME" \
             -p db.passwd="$DB_PWD" \
@@ -3087,21 +3231,7 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
 
         # Key Sizes
         log "Size computation started"
-        echo "ycsb_key,size" > "$KEY_SIZE_LOG"
-        PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$DB_NAME" -At -F"," \
-        -c "SELECT ycsb_key,
-            COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) +
-            COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) +
-            COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) +
-            COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) +
-            COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) +
-            COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) +
-            COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) +
-            COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) +
-            COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) +
-            COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0) AS size
-            FROM usertable;" \
-        >> "$KEY_SIZE_LOG"
+        write_logical_key_sizes "$DB_NAME" "$KEY_SIZE_LOG"
         
         # Verify extend operations: check min, max, avg sizes to detect extension failures
         extend_stats=$(awk -F, '
@@ -3226,9 +3356,9 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
         phase="run"
         set_read_sample_args "$phase" "$iteration"
         run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
-        $YCSB run jdbc-array-json -s \
-        -P $WORKLOAD_FILE \
-        -P $JDBC_PROPERTIES \
+        "$YCSB" run "$YCSB_BINDING" -s \
+        -P "$WORKLOAD_FILE" \
+        -P "$JDBC_PROPERTIES" \
         -p db.url="$DB_URL" \
         -p db.user="$DB_USERNAME" \
         -p db.passwd="$DB_PWD" \
@@ -3268,9 +3398,9 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
         # Reference workload with unchanging value sizes
         phase="reference"
         run_with_metrics "$UNCHANGE_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
-        $YCSB run jdbc-array-json -s \
-        -P $WORKLOAD_FILE \
-        -P $JDBC_PROPERTIES \
+        "$YCSB" run "$YCSB_BINDING" -s \
+        -P "$WORKLOAD_FILE" \
+        -P "$JDBC_PROPERTIES" \
         -p db.url="$UNCHANGE_DB_URL" \
         -p db.user="$DB_USERNAME" \
         -p db.passwd="$DB_PWD" \
@@ -3320,9 +3450,9 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
             log "Backing up the database finished"
 
             run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
-                $YCSB run jdbc-array-json -s \
-                -P $WORKLOAD_FILE \
-                -P $JDBC_PROPERTIES \
+                "$YCSB" run "$YCSB_BINDING" -s \
+                -P "$WORKLOAD_FILE" \
+                -P "$JDBC_PROPERTIES" \
                 -p db.url="$BACKUP_URL" \
                 -p db.user="$DB_USERNAME" \
                 -p db.passwd="$DB_PWD" \
@@ -3338,21 +3468,7 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
 
             # Key Sizes
             log "Size computation started"
-            echo "ycsb_key,size" > "$KEY_SIZE_LOG"
-            PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," \
-            -c "SELECT ycsb_key,
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0) AS size
-                FROM usertable;" \
-            >> "$KEY_SIZE_LOG"
+            write_logical_key_sizes "$BACKUP_DB_NAME" "$KEY_SIZE_LOG"
             
             # Check if the output file exists, if not, create it with headers
             if [[ ! -f "$KEY_SIZE_FILE_AFTER_RUN" ]]; then
@@ -3371,19 +3487,7 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
             recordcount=$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
             # PostgreSQL query to get the total size of all records
-            total_size=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," \
-            -c "SELECT SUM(
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) +
-                COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0)
-            ) FROM usertable;")
+            total_size=$(logical_total_size "$BACKUP_DB_NAME")
 
             # Set average field length
             if [ -z "$total_size" ] || [ -z "$recordcount" ] || [ "$recordcount" -eq 0 ]; then
@@ -3411,12 +3515,12 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
 
             # Resetting the database with new data load
             log "=== Executing the load phase for the comparison study ==="
-            $YCSB load jdbc-array-json -s -P $WORKLOAD_FILE -P $JDBC_PROPERTIES -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" | benchrun_redact_stream > "$OUTPUT_CSV"
-            total_size_comparison_load=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0)) FROM usertable;")
+            "$YCSB" load "$YCSB_BINDING" -s -P "$WORKLOAD_FILE" -P "$JDBC_PROPERTIES" -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD" | benchrun_redact_stream > "$OUTPUT_CSV"
+            total_size_comparison_load=$(logical_total_size "$BACKUP_DB_NAME")
             log "Comparison-load verification - Epoch:$epoch Run:$run TotalSize:$total_size_comparison_load ExpectedFieldLength:$fieldlengthaverage"
             
             # Verify record sizes after avg-run load
-            total_size_avg_run=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field0, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field1, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field2, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field3, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field4, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field5, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field6, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field7, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field8, '[]'::jsonb)) AS elem(value)), 0) + COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(field9, '[]'::jsonb)) AS elem(value)), 0)) FROM usertable;")
+            total_size_avg_run=$(logical_total_size "$BACKUP_DB_NAME")
             log "Avg-run verification - Epoch:$epoch Run:$run Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
             
             # Chainging the value size for comparison
@@ -3428,9 +3532,9 @@ for epoch in $(seq 1 "$EXPERIMENT_EPOCHS"); do
             phase="avg-run"
 
             run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
-                $YCSB run jdbc-array-json -s \
-                -P $WORKLOAD_FILE \
-                -P $JDBC_PROPERTIES \
+                "$YCSB" run "$YCSB_BINDING" -s \
+                -P "$WORKLOAD_FILE" \
+                -P "$JDBC_PROPERTIES" \
                 -p db.url="$BACKUP_URL" \
                 -p db.user="$DB_USERNAME" \
                 -p db.passwd="$DB_PWD"
