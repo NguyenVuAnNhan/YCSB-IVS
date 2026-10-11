@@ -620,7 +620,7 @@ run_comparison_phases() {
 
     collect_cpu_memory_metrics
     backend::collect_metrics $BACKUP_DB_NAME
-    rm -rf "$BACKUP_FILE"
+    (( $KEEP_BACKUP_FILES == 0 )) && rm -rf "$BACKUP_FILE.gz"
     write_result "FALSE"
 
     # Key Sizes

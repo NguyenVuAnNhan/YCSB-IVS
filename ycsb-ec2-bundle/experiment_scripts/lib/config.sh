@@ -185,6 +185,9 @@ config::init_defaults() {
     VACUUM_ENABLED="${VACUUM_ENABLED:-0}"
     vacuum="$VACUUM_ENABLED"                    # legacy name still used by the engine
 
+    # --- KEEP BACKUP Files from clean runs? ------------------------------------
+    KEEP_BACKUP_FILES="${KEEP_BACKUP_FILES:-0}"
+
     # --- RESUME ----------------------------------------------------------------
     # Resume an interrupted run at a global iteration instead of starting over: iterations
     # below this number are skipped and the initial load / reference-load phases do not run,
