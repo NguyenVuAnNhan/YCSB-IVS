@@ -317,6 +317,19 @@ experiment_bootstrap() {
         return 0
     fi
 
+    if [[ "${EXPERIMENT_MODE}" == "compline" ]]; then
+        log "COMPARISON experiment mode; checking existance of main-run database backup artefacts"
+        # no main database not needed in compline mode? Rather need existing backup files as main db would not change per iterations...
+        maxIters=$((STEPS_PER_EPOCH * NUM_EPOCHS))
+        for ((iter=1; iter<=maxIters; iter++)); do
+            expected_backup_file="${BACKUP_FILE%.*}-epoch${iter}.sql"
+            [[ -f "$expected_backup_file" || -f "${expected_backup_file}.gz" ]] || { log "Missing backup file ${expected_backup_file}"; return 1; }
+        done
+        # Later phases read the operation count of the template; the load phase that normally
+        # reads it is one of the phases a resume skips.
+        original_operationcount="${operationcount_override:-$(workload::get_value "$WORKLOAD_FILE" operationcount)}"
+    fi
+
     # Clear the log file and previous backups
     : > "$PLAN_LOG"
     : > "$HISTOGRAM_FILE"
@@ -592,13 +605,17 @@ run_reference_phase() {
 run_comparison_phases() {
     phase="clean-run"
 
-    log "Backing up the database started"
+    if [[ "${EXPERIMENT_MODE}" == "compline" ]]; then 
+        log "Restoring of clean database started"
+    else
+        log "Backing up the database started"
+    fi
     # Under $LOG_DIR (not the current directory): a run's artefacts are all in one place, and
     # dump_restore expects the directory to exist before it writes the log.
     RESTORE_LOG="$LOG_DIR/restore_logs/${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_restore.log"
     mkdir -p "$(dirname "$RESTORE_LOG")"
     backend::dump_restore
-    log "Backing up the database finished"
+    log "Backing up / Restore of clean database finished"
 
     # wait for all backend processes to finish before doing clean run
     backend::wait_idle "$DB_NAME" "${IDLE_WAIT_INTERVAL}" "${IDLE_WAIT_TIMEOUT}"
@@ -714,6 +731,8 @@ experiment::describe_phases() {
     case "${EXPERIMENT_MODE:-mainline}" in
         baseline)
             printf 'load -> (extend -> run) x epochs*steps\n' ;;
+        compline)
+            printf 'load -> reference-load -> (clean-run -> comparison-load -> avg-run) x epochs*steps\n' ;;
         *)
             printf 'load -> reference-load -> (extend -> run -> reference -> clean-run -> comparison-load -> avg-run) x epochs*steps\n' ;;
     esac
@@ -726,8 +745,9 @@ run_experiment() {
     case "${EXPERIMENT_MODE:-mainline}" in
         mainline) run_experiment_mainline ;;
         baseline) run_experiment_baseline ;;
+        compline) run_experiment_compline ;;
         *)
-            echo "[error] unknown experiment mode: ${EXPERIMENT_MODE} (expected mainline or baseline)" >&2
+            echo "[error] unknown experiment mode: ${EXPERIMENT_MODE} (expected mainline or baseline or compline)" >&2
             return 2
             ;;
     esac
@@ -777,6 +797,48 @@ run_experiment_mainline() {
     # rm -rf $LOG_FILE
     # rm -rf $OUTPUT_CSV
     # rm -rf "$KEY_SIZE_LOG"
+
+    experiment_complete
+}
+
+run_experiment_compline() {
+    local -a DB_PARAMS=()
+
+    # Initialise rference (unchanged) and avg-run database; leave main-db untouched.
+    # The clean-run comparison database is created by backend::dump_restore, not here.
+    experiment_bootstrap true "$UNCHANGED_DB_NAME" "$AVGRUN_DB_NAME"
+
+    # A resume starts from the databases an earlier attempt left behind, so it must not load
+    # anything: only the reference load phase runs on a fresh run. Their results are already in the
+    # results CSV that the resume continues to append to. 
+    if ! experiment::resume_active; then
+        # Load unchange value size (reference) DB
+        run_reference_load_phase
+        
+        collect_cpu_memory_metrics
+        backend::collect_metrics $UNCHANGED_DB_NAME
+        write_result "TRUE"
+    fi
+
+    # Experiment parameters
+    for epoch in $(seq 1 "$NUM_EPOCHS"); do
+        for step in $(seq 1 "$STEPS_PER_EPOCH"); do
+
+            iteration=$((STEPS_PER_EPOCH * ($epoch - 1) + $step))
+            (( iteration >= ${RESUME_FROM_ITERATION:-0} )) || continue
+
+            #run_reference_phase
+
+            if (( COMPARISON_INTERVAL > 0 && iteration % COMPARISON_INTERVAL == 0 )); then
+                run_comparison_phases
+            fi
+
+            # No phase is running any more, so say so rather than blaming the last one.
+            phase="iteration-end"
+            pause_if_requested
+            log "END iteration"
+        done
+    done
 
     experiment_complete
 }

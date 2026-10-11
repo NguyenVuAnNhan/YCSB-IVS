@@ -316,6 +316,7 @@ backend::dump_restore() {
     local source_rows restored_rows
     : > "$RESTORE_LOG"
     source_rows=$(backend::exec -d "$DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
+    [[ "${EXPERIMENT_MODE}" != "compline" ]] || source_rows=${RECORDCOUNT}
     [[ "$source_rows" =~ ^[0-9]+$ ]] || return 1
     BACKUP_FILE="${BACKUP_FILE%-epoch*}"
     BACKUP_FILE="${BACKUP_FILE%.sql}-epoch${iteration}.sql"
@@ -341,6 +342,15 @@ backend::dump_restore() {
         return 1
     fi
     echo "[INFO] Restore verified: $restored_rows rows." >> "$RESTORE_LOG"
+
+    # re-create key histogram file from restored data when in compline mode
+    if [[ "${EXPERIMENT_MODE}" == "compline" ]]; then
+        log "Key size computation started"
+	    backend::key_sizes "$BACKUP_DB_NAME" "$KEY_SIZE_LOG"
+        get_key_sizes $KEY_SIZE_LOG $HISTOGRAM_FILE
+        merge_value_sizes "$KEY_SIZE_FILE_AFTER_EXTEND"
+        log "END Key size computation database=$BACKUP_DB_NAME"
+    fi
 }
 
 # Counters describing what the server's own maintenance did to the measured table: vacuum and

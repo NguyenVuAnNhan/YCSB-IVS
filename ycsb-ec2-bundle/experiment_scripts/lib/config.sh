@@ -164,9 +164,11 @@ config::init_defaults() {
     # --- experiment mode -------------------------------------------------------
     # mainline: the full phase sequence, including both comparison databases.
     # baseline: load -> [extend -> measure] only (lib/lifecycle_baseline.sh).
+    # compline: runs using comparison database sequence only WITHOUT extend/run parts.
     EXPERIMENT_MODE="${EXPERIMENT_MODE:-mainline}"
     case "$EXPERIMENT_MODE" in
         mainline) MODE_SUFFIX="" ;;
+        compline) MODE_SUFFIX="" ;;
         baseline)
             # Artefacts of a baseline run must never overwrite the mainline run they are
             # compared with, so the mode is part of every generated name.

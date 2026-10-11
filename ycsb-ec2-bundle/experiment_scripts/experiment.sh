@@ -66,10 +66,13 @@ Options:
   --run-id ID         run counter, used in artefact names
   --type NAME         experiment type, prefix of every artefact name
   --scale NAME        scale mode (heavy|light), selects conf/scale.<NAME>.env
-  --mode NAME         phase sequence: mainline (default) or baseline. A baseline run is
+  --mode NAME         phase sequence: mainline (default), baseline, or compline. A baseline run is
                       load -> [extend -> measure] repeated, without the reference database
                       and the comparison (clean-run / comparison-load / avg-run) phases; its
                       artefact names gain a _baseline suffix.
+                      A compline run is (reference / clean-run / comparison-load / avg-run) phases
+                      without the baseline [extend -> measure] phases; it needs backup files being
+                      left from a rpevious mainline or baseline run with KEEP_BACKUP_FILES=1.
   --workload FILE     read-only workload template (never modified)
   --experiment-dir D  root for logs, data and generated workloads
   --resume-from N     continue an interrupted run at global iteration N: the load phases do not
@@ -127,7 +130,7 @@ while (($#)); do
             config::set_cli "RESUME_FROM_ITERATION=$2"; shift 2 ;;
         --mode)
             case "${2:-}" in
-                mainline | baseline) config::set_cli "EXPERIMENT_MODE=$2"; shift 2 ;;
+                mainline | baseline | compline) config::set_cli "EXPERIMENT_MODE=$2"; shift 2 ;;
                 *) echo "[error] --mode must be mainline or baseline, got: ${2:-<empty>}" >&2; exit 2 ;;
             esac ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -186,6 +189,10 @@ if (( DRY_RUN )); then
     if [[ "$EXPERIMENT_MODE" == baseline ]]; then
         mode_note=" — no reference and no comparison phases"
         databases_note=" (baseline mode creates no reference/comparison database)"
+    fi
+    if [[ "$EXPERIMENT_MODE" == compline ]]; then
+        mode_note=" — no extend and main-run phases"
+        databases_note=" (compline mode creates/changes no main database)"
     fi
     cat <<DRYRUN
 backend:          $ACTIVE_BACKEND ($(registry::info display_name))
