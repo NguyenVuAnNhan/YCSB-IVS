@@ -618,8 +618,8 @@ run_comparison_phases() {
     backend::dump_restore
     log "Backing up / Restore of clean database finished"
 
-    # wait for all backend processes to finish before doing clean run
-    backend::wait_idle "$DB_NAME" "${IDLE_WAIT_INTERVAL}" "${IDLE_WAIT_TIMEOUT}"
+    # wait for all backend processes to finish before doing clean run => set_maintenance_mode OFF while stop this anyway; trying to avoid buffer clean..
+    # backend::wait_idle "$DB_NAME" "${IDLE_WAIT_INTERVAL}" "${IDLE_WAIT_TIMEOUT}"
 
     # The restored copy inherits whatever its settings were when it was dumped, so ask again —
     # for the copy that is about to be measured as well as for the database it came from.
