@@ -52,11 +52,12 @@ set_maintenance_mode() {
     registry::capability supports_maintenance_mode || return 0
     # Repeating a mode the database is already in is normal here (every iteration asks for the
     # same two switches), so it is not logged as if it were a change.
+    # We do only switch mode to a different one - PostgreSQL otherwise stops any active auto-vacuum run
     if [[ "$MAINTENANCE_MODE_STATE" != "$mode" ]]; then
         log "MAINTENANCE mode=$mode database=$db_name background maintenance of the measured table"
+        backend::maintenance_mode "$mode" "$db_name"
+        MAINTENANCE_MODE_STATE="$mode"
     fi
-    backend::maintenance_mode "$mode" "$db_name"
-    MAINTENANCE_MODE_STATE="$mode"
 }
 
 # Stop between iterations while the pause file exists. Checked at an iteration boundary, never
@@ -711,9 +712,10 @@ experiment_complete() {
 
     # Never hand back a database with its background maintenance switched off by us: the next
     # run of the same databases would start paused without anyone asking.
-    if [[ "${MAINTENANCE_MODE_STATE:-}" == off ]]; then
-        set_maintenance_mode on "$DB_NAME"
-    fi
+    # for debug purposes, want to keep that state off... [UR 5 Oct]
+    #if [[ "${MAINTENANCE_MODE_STATE:-}" == off ]]; then
+    #    set_maintenance_mode on "$DB_NAME"
+    #fi
 
     # One last marker in the server log, so an archived slice of it has an end boundary too.
     mark_run_phase "$DB_NAME" "END"
