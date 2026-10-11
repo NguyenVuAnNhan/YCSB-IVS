@@ -732,7 +732,8 @@ postgresql::base_config() {
 
     DB_NAME="${DB_NAME:-ycsb}"
     BACKUP_DB_NAME="${BACKUP_DB_NAME:-ycsb_backup}"
-    UNCHANGED_DB_NAME="${UNCHANGED_DB_NAME:-ycsb_unchange}"
+    AVGRUN_DB_NAME="${AVGRUN_DB_NAME:-ycsb_avgsize}"
+    UNCHANGED_DB_NAME="${UNCHANGED_DB_NAME:-ycsb_unchanged}"
     TARGET_TABLE="${TARGET_TABLE:-usertable}"
 
     # PostgreSQL endpoint shared by the JDBC binding and the CLI commands
@@ -743,6 +744,7 @@ postgresql::base_config() {
 
     DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$DB_NAME"
     BACKUP_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$BACKUP_DB_NAME"
+    AVGRUN_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$AVGRUN_DB_NAME"
     UNCHANGED_DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$UNCHANGED_DB_NAME"
     JDBC_PROPERTIES="${JDBC_PROPERTIES:-$properties_default}"
 

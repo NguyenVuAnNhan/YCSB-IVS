@@ -302,7 +302,7 @@ experiment_bootstrap() {
 
     start_logging
     log "START preflight"
-    backend::preflight "$needs_dump" "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"
+    backend::preflight "$needs_dump" "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME" "$AVGRUN_DB_NAME" 
     workload::init
     log "END preflight"
     mkdir -p "$(dirname "$OUTPUT_FILE")" "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")"
@@ -624,6 +624,7 @@ run_comparison_phases() {
     # The restored copy inherits whatever its settings were when it was dumped, so ask again —
     # for the copy that is about to be measured as well as for the database it came from.
     set_maintenance_mode off "$BACKUP_DB_NAME"
+    set_maintenance_mode off "$AVGRUN_DB_NAME"
     set_maintenance_mode off "$DB_NAME"
 
     WORKLOAD_PHASE="$(workload::generate clean-run "$iteration")"
@@ -664,23 +665,24 @@ run_comparison_phases() {
 
     log "Total size: $total_size, Field length average: $fieldlengthaverage"
 
-    # The comparison database is reloaded at the measured average value size.
+    # The comparison avgsize database is reloaded at the measured average value size.
     WORKLOAD_PHASE="$(workload::generate comparison-load "$iteration")"
     actual_fieldlength="$(workload::get_value "$WORKLOAD_PHASE" fieldlength)"
     log "Workload file fieldlength set to: $actual_fieldlength (expected: $fieldlengthaverage)"
 
-    backend::truncate "$BACKUP_DB_NAME"
+    #pg_cli createdb "$AVGRUN_DB_NAME" || return 1
+    backend::truncate "$AVGRUN_DB_NAME"
 
     # Resetting the database with new data load
     phase="comparison-load"
     log "=== Executing the load phase for the comparison study ==="
-    binding_db_params "$BACKUP_URL"
+    binding_db_params "$AVGRUN_URL"
     run_ycsb "comparison-load" load "$YCSB_BINDING" -s -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" "${DB_PARAMS[@]}"
-    total_size_comparison_load=$(backend::total_size "$BACKUP_DB_NAME")
+    total_size_comparison_load=$(backend::total_size "$AVGRUN_DB_NAME")
     log "Comparison-load verification - Epoch:$epoch Step:$step TotalSize:$total_size_comparison_load ExpectedFieldLength:$fieldlengthaverage"
 
     # Verify record sizes after avg-run load
-    total_size_avg_run=$(backend::total_size "$BACKUP_DB_NAME")
+    total_size_avg_run=$(backend::total_size "$AVGRUN_DB_NAME")
     log "Avg-run verification - Epoch:$epoch Step:$step Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
 
     # The avg-run compares at the original value size again.
@@ -693,16 +695,19 @@ run_comparison_phases() {
     # Execute the run phase
     log "Preparing run workload: read=$readproportion update=$updateproportion extend=$extendproportion"
     phase="avg-run"
-    binding_db_params "$BACKUP_URL"
-    run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
+    binding_db_params "$AVGRUN_URL"
+    run_with_metrics "$AVGRUN_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
         "$YCSB" run "$YCSB_BINDING" -s \
         -P "$WORKLOAD_PHASE" \
         -P "$JDBC_PROPERTIES" \
         "${DB_PARAMS[@]}"
 
     collect_cpu_memory_metrics
-    backend::collect_metrics $BACKUP_DB_NAME
+    backend::collect_metrics $AVGRUN_DB_NAME
     write_result "FALSE"
+
+    # make sure no auto-vacuum has been triggered by the previous avg-run which might spill over to next phase
+    backend::wait_idle "$AVGRUN_DB_NAME" "${IDLE_WAIT_INTERVAL}" "${IDLE_WAIT_TIMEOUT}"
 }
 
 # The completion marker finish_logging requires: a run that returns without it is reported as
@@ -758,8 +763,8 @@ run_experiment() {
 run_experiment_mainline() {
     local -a DB_PARAMS=()
 
-    # The comparison database is created by backend::dump_restore, not here.
-    experiment_bootstrap true "$DB_NAME" "$UNCHANGED_DB_NAME"
+    # The clean-run comparison database is created by backend::dump_restore, not here.
+    experiment_bootstrap true "$DB_NAME" "$UNCHANGED_DB_NAME" "$AVGRUN_DB_NAME"
 
     # A resume starts from the databases an earlier attempt left behind, so it must not load
     # anything: both load phases run only on a fresh run. Their results are already in the
