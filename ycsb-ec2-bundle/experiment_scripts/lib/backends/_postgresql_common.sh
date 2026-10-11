@@ -76,12 +76,12 @@ pg_cli() {
         [[ "$arg" != -c ]] || next_is_sql=true
         [[ "$arg" != -d && "$arg" != --dbname ]] || next_is_db=true
     done
-    log "START PostgreSQL operation tool=$tool action=$action database=$target_db"
+    #log "START PostgreSQL operation tool=$tool action=$action database=$target_db"
     # Do not log arguments: JDBC/CLI arguments can contain credentials.
     PGPASSWORD="$DB_PWD" PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-10}" \
         "$tool" --host="$DB_HOST" --port="$DB_PORT" --username="$DB_USERNAME" \
         --no-password "$@" || rc=$?
-    log "END PostgreSQL operation tool=$tool action=$action database=$target_db status=$rc duration=$((SECONDS-started))s"
+    #log "END PostgreSQL operation tool=$tool action=$action database=$target_db status=$rc duration=$((SECONDS-started))s"
     return "$rc"
 }
 
