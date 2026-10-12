@@ -312,22 +312,35 @@ backend::preflight() {
     echo "[INFO] PG18 preflight passed on $DB_HOST:$DB_PORT (server_version_num=$server_version)."
 }
 
+backend::create_backup() {
+    local database="${1:-$DB_NAME}"
+    local compress="${2:-1}"
+ 
+    BACKUP_FILE="${BACKUP_FILE%-epoch*}"
+    BACKUP_FILE="${BACKUP_FILE%.sql}-epoch${iteration}.sql"
+    log "backup file: ${BACKUP_FILE}"
+
+    # A fresh target does not need --clean DROP statements. Keep dump/log on failure.
+    if [ ! -f "${BACKUP_FILE}" -a ! -f "${BACKUP_FILE}.gz" ]; then
+        mkdir -p "$(dirname "$BACKUP_FILE")"
+        if ! pg_cli pg_dump -d "$database" > "$BACKUP_FILE" 2>> "$RESTORE_LOG"; then
+            echo "[ERROR] Dump failed; see $RESTORE_LOG." >&2
+            return 1
+        fi
+    fi
+
+    (( compress == 1 )) && gzip --best "${BACKUP_FILE}"
+}
+
 backend::dump_restore() {
     local source_rows restored_rows
     : > "$RESTORE_LOG"
     source_rows=$(backend::exec -d "$DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
     [[ "${EXPERIMENT_MODE}" != "compline" ]] || source_rows=${RECORDCOUNT}
     [[ "$source_rows" =~ ^[0-9]+$ ]] || return 1
-    BACKUP_FILE="${BACKUP_FILE%-epoch*}"
-    BACKUP_FILE="${BACKUP_FILE%.sql}-epoch${iteration}.sql"
-    log "backup file: ${BACKUP_FILE}"
-    # A fresh target does not need --clean DROP statements. Keep dump/log on failure.
-    if [ ! -f "${BACKUP_FILE}" -a ! -f "${BACKUP_FILE}.gz" ]; then
-        if ! pg_cli pg_dump -d "$DB_NAME" > "$BACKUP_FILE" 2>> "$RESTORE_LOG"; then
-            echo "[ERROR] Dump failed; see $RESTORE_LOG." >&2
-            return 1
-        fi
-    fi
+
+    backend::create_backup "$DB_NAME" 0 || return 1
+
     pg_cli dropdb --maintenance-db="$PG_MAINTENANCE_DB" --if-exists "$BACKUP_DB_NAME" || return 1
     pg_cli createdb "$BACKUP_DB_NAME" || return 1
     [ -f "${BACKUP_FILE}.gz" ] && gunzip "${BACKUP_FILE}"
@@ -335,7 +348,9 @@ backend::dump_restore() {
         echo "[ERROR] Restore failed; see $RESTORE_LOG. Dump retained at $BACKUP_FILE." >&2
         return 1
     fi
+
     gzip --best "${BACKUP_FILE}"
+    
     restored_rows=$(backend::exec -d "$BACKUP_DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
     if [[ "$restored_rows" != "$source_rows" ]]; then
         echo "[ERROR] Restore row count mismatch: source=$source_rows target=$restored_rows." >&2
