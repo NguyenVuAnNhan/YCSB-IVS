@@ -168,7 +168,11 @@ config::init_defaults() {
     EXPERIMENT_MODE="${EXPERIMENT_MODE:-mainline}"
     case "$EXPERIMENT_MODE" in
         mainline) MODE_SUFFIX="" ;;
-        compline) MODE_SUFFIX="" ;;
+        compline)
+            # Artefacts of a compline comparison run must never overwrite the mainline 
+            # or baseline run they are compared with, so the mode is part of every generated name.
+            MODE_SUFFIX="_comprun"
+            ;;
         baseline)
             # Artefacts of a baseline run must never overwrite the mainline run they are
             # compared with, so the mode is part of every generated name.
