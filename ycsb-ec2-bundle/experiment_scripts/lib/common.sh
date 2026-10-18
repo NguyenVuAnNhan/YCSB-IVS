@@ -24,8 +24,8 @@
 # epoch/step with a different quantity: log() reads the globals, so a local named `epoch` holding
 # something else silently mislabels every line emitted while it is in scope.
 log() {
-    printf '[epoch=%s run=%s phase=%s] %s\n' \
-        "${epoch:-0}" "${step:-0}" "${phase:-setup}" "$*" >&2
+    printf '[epoch=%s step=%s iter=%s phase=%s] %s\n' \
+        "${epoch:-0}" "${step:-0}" "${iteration:-0}" "${phase:-setup}" "$*" >&2
 }
 
 start_logging() {

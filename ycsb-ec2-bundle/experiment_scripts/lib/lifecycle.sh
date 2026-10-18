@@ -52,11 +52,12 @@ set_maintenance_mode() {
     registry::capability supports_maintenance_mode || return 0
     # Repeating a mode the database is already in is normal here (every iteration asks for the
     # same two switches), so it is not logged as if it were a change.
+    # We do only switch mode to a different one - PostgreSQL otherwise stops any active auto-vacuum run
     if [[ "$MAINTENANCE_MODE_STATE" != "$mode" ]]; then
         log "MAINTENANCE mode=$mode database=$db_name background maintenance of the measured table"
+        backend::maintenance_mode "$mode" "$db_name"
+        MAINTENANCE_MODE_STATE="$mode"
     fi
-    backend::maintenance_mode "$mode" "$db_name"
-    MAINTENANCE_MODE_STATE="$mode"
 }
 
 # Stop between iterations while the pause file exists. Checked at an iteration boundary, never
@@ -301,7 +302,7 @@ experiment_bootstrap() {
 
     start_logging
     log "START preflight"
-    backend::preflight "$needs_dump" "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"
+    backend::preflight "$needs_dump" "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME" "$AVGRUN_DB_NAME" 
     workload::init
     log "END preflight"
     mkdir -p "$(dirname "$OUTPUT_FILE")" "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")"
@@ -315,6 +316,19 @@ experiment_bootstrap() {
         # reads it is one of the phases a resume skips.
         original_operationcount="${operationcount_override:-$(workload::get_value "$WORKLOAD_FILE" operationcount)}"
         return 0
+    fi
+
+    if [[ "${EXPERIMENT_MODE}" == "compline" ]]; then
+        log "COMPARISON experiment mode; checking existance of main-run database backup artefacts"
+        # no main database not needed in compline mode? Rather need existing backup files as main db would not change per iterations...
+        maxIters=$((STEPS_PER_EPOCH * NUM_EPOCHS))
+        for ((iter=1; iter<=maxIters; iter++)); do
+            expected_backup_file="${BACKUP_FILE%.*}-epoch${iter}.sql"
+            [[ -f "$expected_backup_file" || -f "${expected_backup_file}.gz" ]] || { log "Missing backup file ${expected_backup_file}"; return 1; }
+        done
+        # Later phases read the operation count of the template; the load phase that normally
+        # reads it is one of the phases a resume skips.
+        original_operationcount="${operationcount_override:-$(workload::get_value "$WORKLOAD_FILE" operationcount)}"
     fi
 
     # Clear the log file and previous backups
@@ -592,20 +606,25 @@ run_reference_phase() {
 run_comparison_phases() {
     phase="clean-run"
 
-    log "Backing up the database started"
+    if [[ "${EXPERIMENT_MODE}" == "compline" ]]; then 
+        log "Restoring of clean database started"
+    else
+        log "Backing up the database started"
+    fi
     # Under $LOG_DIR (not the current directory): a run's artefacts are all in one place, and
     # dump_restore expects the directory to exist before it writes the log.
     RESTORE_LOG="$LOG_DIR/restore_logs/${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_restore.log"
     mkdir -p "$(dirname "$RESTORE_LOG")"
     backend::dump_restore
-    log "Backing up the database finished"
+    log "Backing up / Restore of clean database finished"
 
-    # wait for all backend processes to finish before doing clean run
-    backend::wait_idle "$DB_NAME" "${IDLE_WAIT_INTERVAL}" "${IDLE_WAIT_TIMEOUT}"
+    # wait for all backend processes to finish before doing clean run => set_maintenance_mode OFF while stop this anyway; trying to avoid buffer clean..
+    # backend::wait_idle "$DB_NAME" "${IDLE_WAIT_INTERVAL}" "${IDLE_WAIT_TIMEOUT}"
 
     # The restored copy inherits whatever its settings were when it was dumped, so ask again —
     # for the copy that is about to be measured as well as for the database it came from.
     set_maintenance_mode off "$BACKUP_DB_NAME"
+    set_maintenance_mode off "$AVGRUN_DB_NAME"
     set_maintenance_mode off "$DB_NAME"
 
     WORKLOAD_PHASE="$(workload::generate clean-run "$iteration")"
@@ -620,7 +639,7 @@ run_comparison_phases() {
 
     collect_cpu_memory_metrics
     backend::collect_metrics $BACKUP_DB_NAME
-    rm -rf "$BACKUP_FILE"
+    (( $KEEP_BACKUP_FILES == 0 )) && rm -rf "$BACKUP_FILE.gz"
     write_result "FALSE"
 
     # Key Sizes
@@ -646,23 +665,24 @@ run_comparison_phases() {
 
     log "Total size: $total_size, Field length average: $fieldlengthaverage"
 
-    # The comparison database is reloaded at the measured average value size.
+    # The comparison avgsize database is reloaded at the measured average value size.
     WORKLOAD_PHASE="$(workload::generate comparison-load "$iteration")"
     actual_fieldlength="$(workload::get_value "$WORKLOAD_PHASE" fieldlength)"
     log "Workload file fieldlength set to: $actual_fieldlength (expected: $fieldlengthaverage)"
 
-    backend::truncate "$BACKUP_DB_NAME"
+    #pg_cli createdb "$AVGRUN_DB_NAME" || return 1
+    backend::truncate "$AVGRUN_DB_NAME"
 
     # Resetting the database with new data load
     phase="comparison-load"
     log "=== Executing the load phase for the comparison study ==="
-    binding_db_params "$BACKUP_URL"
+    binding_db_params "$AVGRUN_URL"
     run_ycsb "comparison-load" load "$YCSB_BINDING" -s -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" "${DB_PARAMS[@]}"
-    total_size_comparison_load=$(backend::total_size "$BACKUP_DB_NAME")
+    total_size_comparison_load=$(backend::total_size "$AVGRUN_DB_NAME")
     log "Comparison-load verification - Epoch:$epoch Step:$step TotalSize:$total_size_comparison_load ExpectedFieldLength:$fieldlengthaverage"
 
     # Verify record sizes after avg-run load
-    total_size_avg_run=$(backend::total_size "$BACKUP_DB_NAME")
+    total_size_avg_run=$(backend::total_size "$AVGRUN_DB_NAME")
     log "Avg-run verification - Epoch:$epoch Step:$step Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
 
     # The avg-run compares at the original value size again.
@@ -675,16 +695,19 @@ run_comparison_phases() {
     # Execute the run phase
     log "Preparing run workload: read=$readproportion update=$updateproportion extend=$extendproportion"
     phase="avg-run"
-    binding_db_params "$BACKUP_URL"
-    run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
+    binding_db_params "$AVGRUN_URL"
+    run_with_metrics "$AVGRUN_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
         "$YCSB" run "$YCSB_BINDING" -s \
         -P "$WORKLOAD_PHASE" \
         -P "$JDBC_PROPERTIES" \
         "${DB_PARAMS[@]}"
 
     collect_cpu_memory_metrics
-    backend::collect_metrics $BACKUP_DB_NAME
+    backend::collect_metrics $AVGRUN_DB_NAME
     write_result "FALSE"
+
+    # make sure no auto-vacuum has been triggered by the previous avg-run which might spill over to next phase
+    backend::wait_idle "$AVGRUN_DB_NAME" "${IDLE_WAIT_INTERVAL}" "${IDLE_WAIT_TIMEOUT}"
 }
 
 # The completion marker finish_logging requires: a run that returns without it is reported as
@@ -694,9 +717,10 @@ experiment_complete() {
 
     # Never hand back a database with its background maintenance switched off by us: the next
     # run of the same databases would start paused without anyone asking.
-    if [[ "${MAINTENANCE_MODE_STATE:-}" == off ]]; then
-        set_maintenance_mode on "$DB_NAME"
-    fi
+    # for debug purposes, want to keep that state off... [UR 5 Oct]
+    #if [[ "${MAINTENANCE_MODE_STATE:-}" == off ]]; then
+    #    set_maintenance_mode on "$DB_NAME"
+    #fi
 
     # One last marker in the server log, so an archived slice of it has an end boundary too.
     mark_run_phase "$DB_NAME" "END"
@@ -714,6 +738,8 @@ experiment::describe_phases() {
     case "${EXPERIMENT_MODE:-mainline}" in
         baseline)
             printf 'load -> (extend -> run) x epochs*steps\n' ;;
+        compline)
+            printf 'load -> reference-load -> (clean-run -> comparison-load -> avg-run) x epochs*steps\n' ;;
         *)
             printf 'load -> reference-load -> (extend -> run -> reference -> clean-run -> comparison-load -> avg-run) x epochs*steps\n' ;;
     esac
@@ -726,8 +752,9 @@ run_experiment() {
     case "${EXPERIMENT_MODE:-mainline}" in
         mainline) run_experiment_mainline ;;
         baseline) run_experiment_baseline ;;
+        compline) run_experiment_compline ;;
         *)
-            echo "[error] unknown experiment mode: ${EXPERIMENT_MODE} (expected mainline or baseline)" >&2
+            echo "[error] unknown experiment mode: ${EXPERIMENT_MODE} (expected mainline or baseline or compline)" >&2
             return 2
             ;;
     esac
@@ -736,8 +763,8 @@ run_experiment() {
 run_experiment_mainline() {
     local -a DB_PARAMS=()
 
-    # The comparison database is created by backend::dump_restore, not here.
-    experiment_bootstrap true "$DB_NAME" "$UNCHANGED_DB_NAME"
+    # The clean-run comparison database is created by backend::dump_restore, not here.
+    experiment_bootstrap true "$DB_NAME" "$UNCHANGED_DB_NAME" "$AVGRUN_DB_NAME"
 
     # A resume starts from the databases an earlier attempt left behind, so it must not load
     # anything: both load phases run only on a fresh run. Their results are already in the
@@ -777,6 +804,48 @@ run_experiment_mainline() {
     # rm -rf $LOG_FILE
     # rm -rf $OUTPUT_CSV
     # rm -rf "$KEY_SIZE_LOG"
+
+    experiment_complete
+}
+
+run_experiment_compline() {
+    local -a DB_PARAMS=()
+
+    # Initialise rference (unchanged) and avg-run database; leave main-db untouched.
+    # The clean-run comparison database is created by backend::dump_restore, not here.
+    experiment_bootstrap true "$UNCHANGED_DB_NAME" "$AVGRUN_DB_NAME"
+
+    # A resume starts from the databases an earlier attempt left behind, so it must not load
+    # anything: only the reference load phase runs on a fresh run. Their results are already in the
+    # results CSV that the resume continues to append to. 
+    if ! experiment::resume_active; then
+        # Load unchange value size (reference) DB
+        run_reference_load_phase
+        
+        collect_cpu_memory_metrics
+        backend::collect_metrics $UNCHANGED_DB_NAME
+        write_result "TRUE"
+    fi
+
+    # Experiment parameters
+    for epoch in $(seq 1 "$NUM_EPOCHS"); do
+        for step in $(seq 1 "$STEPS_PER_EPOCH"); do
+
+            iteration=$((STEPS_PER_EPOCH * ($epoch - 1) + $step))
+            (( iteration >= ${RESUME_FROM_ITERATION:-0} )) || continue
+
+            #run_reference_phase
+
+            if (( COMPARISON_INTERVAL > 0 && iteration % COMPARISON_INTERVAL == 0 )); then
+                run_comparison_phases
+            fi
+
+            # No phase is running any more, so say so rather than blaming the last one.
+            phase="iteration-end"
+            pause_if_requested
+            log "END iteration"
+        done
+    done
 
     experiment_complete
 }

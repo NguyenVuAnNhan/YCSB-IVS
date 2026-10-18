@@ -164,9 +164,15 @@ config::init_defaults() {
     # --- experiment mode -------------------------------------------------------
     # mainline: the full phase sequence, including both comparison databases.
     # baseline: load -> [extend -> measure] only (lib/lifecycle_baseline.sh).
+    # compline: runs using comparison database sequence only WITHOUT extend/run parts.
     EXPERIMENT_MODE="${EXPERIMENT_MODE:-mainline}"
     case "$EXPERIMENT_MODE" in
         mainline) MODE_SUFFIX="" ;;
+        compline)
+            # Artefacts of a compline comparison run must never overwrite the mainline 
+            # or baseline run they are compared with, so the mode is part of every generated name.
+            MODE_SUFFIX="_comprun"
+            ;;
         baseline)
             # Artefacts of a baseline run must never overwrite the mainline run they are
             # compared with, so the mode is part of every generated name.
@@ -184,6 +190,9 @@ config::init_defaults() {
     # --- VACUUM ----------------------------------------------------------------
     VACUUM_ENABLED="${VACUUM_ENABLED:-0}"
     vacuum="$VACUUM_ENABLED"                    # legacy name still used by the engine
+
+    # --- KEEP BACKUP Files from clean runs? ------------------------------------
+    KEEP_BACKUP_FILES="${KEEP_BACKUP_FILES:-0}"
 
     # --- RESUME ----------------------------------------------------------------
     # Resume an interrupted run at a global iteration instead of starting over: iterations

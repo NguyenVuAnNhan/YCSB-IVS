@@ -76,12 +76,12 @@ pg_cli() {
         [[ "$arg" != -c ]] || next_is_sql=true
         [[ "$arg" != -d && "$arg" != --dbname ]] || next_is_db=true
     done
-    log "START PostgreSQL operation tool=$tool action=$action database=$target_db"
+    #log "START PostgreSQL operation tool=$tool action=$action database=$target_db"
     # Do not log arguments: JDBC/CLI arguments can contain credentials.
     PGPASSWORD="$DB_PWD" PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-10}" \
         "$tool" --host="$DB_HOST" --port="$DB_PORT" --username="$DB_USERNAME" \
         --no-password "$@" || rc=$?
-    log "END PostgreSQL operation tool=$tool action=$action database=$target_db status=$rc duration=$((SECONDS-started))s"
+    #log "END PostgreSQL operation tool=$tool action=$action database=$target_db status=$rc duration=$((SECONDS-started))s"
     return "$rc"
 }
 
@@ -312,28 +312,60 @@ backend::preflight() {
     echo "[INFO] PG18 preflight passed on $DB_HOST:$DB_PORT (server_version_num=$server_version)."
 }
 
+backend::create_backup() {
+    local database="${1:-$DB_NAME}"
+    local compress="${2:-1}"
+ 
+    BACKUP_FILE="${BACKUP_FILE%-epoch*}"
+    BACKUP_FILE="${BACKUP_FILE%.sql}-epoch${iteration}.sql"
+    log "backup file: ${BACKUP_FILE}"
+
+    # A fresh target does not need --clean DROP statements. Keep dump/log on failure.
+    if [ ! -f "${BACKUP_FILE}" -a ! -f "${BACKUP_FILE}.gz" ]; then
+        mkdir -p "$(dirname "$BACKUP_FILE")"
+        if ! pg_cli pg_dump -d "$database" > "$BACKUP_FILE" 2>> "$RESTORE_LOG"; then
+            echo "[ERROR] Dump failed; see $RESTORE_LOG." >&2
+            return 1
+        fi
+    fi
+
+    (( compress == 1 )) && gzip --best "${BACKUP_FILE}"
+}
+
 backend::dump_restore() {
     local source_rows restored_rows
     : > "$RESTORE_LOG"
     source_rows=$(backend::exec -d "$DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
+    [[ "${EXPERIMENT_MODE}" != "compline" ]] || source_rows=${RECORDCOUNT}
     [[ "$source_rows" =~ ^[0-9]+$ ]] || return 1
-    # A fresh target does not need --clean DROP statements. Keep dump/log on failure.
-    if ! pg_cli pg_dump -d "$DB_NAME" > "$BACKUP_FILE" 2>> "$RESTORE_LOG"; then
-        echo "[ERROR] Dump failed; see $RESTORE_LOG." >&2
-        return 1
-    fi
+
+    backend::create_backup "$DB_NAME" 0 || return 1
+
     pg_cli dropdb --maintenance-db="$PG_MAINTENANCE_DB" --if-exists "$BACKUP_DB_NAME" || return 1
     pg_cli createdb "$BACKUP_DB_NAME" || return 1
+    [ -f "${BACKUP_FILE}.gz" ] && gunzip "${BACKUP_FILE}"
     if ! backend::exec -d "$BACKUP_DB_NAME" -f "$BACKUP_FILE" >> "$RESTORE_LOG" 2>&1; then
         echo "[ERROR] Restore failed; see $RESTORE_LOG. Dump retained at $BACKUP_FILE." >&2
         return 1
     fi
+
+    gzip --best "${BACKUP_FILE}"
+    
     restored_rows=$(backend::exec -d "$BACKUP_DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
     if [[ "$restored_rows" != "$source_rows" ]]; then
         echo "[ERROR] Restore row count mismatch: source=$source_rows target=$restored_rows." >&2
         return 1
     fi
     echo "[INFO] Restore verified: $restored_rows rows." >> "$RESTORE_LOG"
+
+    # re-create key histogram file from restored data when in compline mode
+    if [[ "${EXPERIMENT_MODE}" == "compline" ]]; then
+        log "Key size computation started"
+	    backend::key_sizes "$BACKUP_DB_NAME" "$KEY_SIZE_LOG"
+        get_key_sizes $KEY_SIZE_LOG $HISTOGRAM_FILE
+        merge_value_sizes "$KEY_SIZE_FILE_AFTER_EXTEND"
+        log "END Key size computation database=$BACKUP_DB_NAME"
+    fi
 }
 
 # Counters describing what the server's own maintenance did to the measured table: vacuum and
@@ -715,7 +747,8 @@ postgresql::base_config() {
 
     DB_NAME="${DB_NAME:-ycsb}"
     BACKUP_DB_NAME="${BACKUP_DB_NAME:-ycsb_backup}"
-    UNCHANGED_DB_NAME="${UNCHANGED_DB_NAME:-ycsb_unchange}"
+    AVGRUN_DB_NAME="${AVGRUN_DB_NAME:-ycsb_avgsize}"
+    UNCHANGED_DB_NAME="${UNCHANGED_DB_NAME:-ycsb_unchanged}"
     TARGET_TABLE="${TARGET_TABLE:-usertable}"
 
     # PostgreSQL endpoint shared by the JDBC binding and the CLI commands
@@ -726,6 +759,7 @@ postgresql::base_config() {
 
     DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$DB_NAME"
     BACKUP_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$BACKUP_DB_NAME"
+    AVGRUN_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$AVGRUN_DB_NAME"
     UNCHANGED_DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$UNCHANGED_DB_NAME"
     JDBC_PROPERTIES="${JDBC_PROPERTIES:-$properties_default}"
 

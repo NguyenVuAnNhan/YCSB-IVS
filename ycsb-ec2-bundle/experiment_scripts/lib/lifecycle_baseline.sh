@@ -48,6 +48,16 @@ run_experiment_baseline() {
 
             # No phase is running any more, so say so rather than blaming the last one.
             phase="iteration-end"
+
+            # optionally keep a backup file of the state of the database after each iteration
+            if (( KEEP_BACKUP_FILES == 1 )); then
+                log "Backing up database ${DB_NAME}"
+                # backend::create_backup expects the directory to exist before it writes the log.
+                RESTORE_LOG="$LOG_DIR/backup_logs/${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_backup.log"
+                mkdir -p "$(dirname "$RESTORE_LOG")"
+                backend::create_backup "$DB_NAME" || return 1
+            fi
+
             pause_if_requested
             log "END iteration"
         done
