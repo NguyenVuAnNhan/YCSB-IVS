@@ -34,7 +34,7 @@ YCSB-IVS has been used to evaluate many widely-used databases:
 
 ## Getting started
 
-Refer to [ycsb-ec2-bundle/BUNDLE_README.md](ycsb-ec2-bundle/BUNDLE_README.md) and [ycsb-ec2-bundle/experiment_scripts/README.md](ycsb-ec2-bundle/experiment_scripts/README.md) for details of how to build the code and run the experiments, respectively.
+Refer to [ycsb-ec2-bundle/README.md](ycsb-ec2-bundle/README.md) and [ycsb-ec2-bundle/experiment_scripts/README.md](ycsb-ec2-bundle/experiment_scripts/README.md) for details of how to build the code and run the experiments, respectively.
 
 For details on running YCSB (the core tool behind YCSB-IVS), refer to the installation and build guide:  
 [Official YCSB README](https://github.com/brianfrankcooper/YCSB/blob/master/README.md)  
